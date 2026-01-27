@@ -1,4 +1,5 @@
-torch>=2.0
+# PyTorch must be installed separately for Jetson - see README.md
+# pip install these after PyTorch is working:
 soundfile
 flask
 qwen-tts
