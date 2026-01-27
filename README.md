@@ -34,7 +34,6 @@ You need a Jetson-specific build. Options:
 2. **Build from Source** (if pre-built unavailable):
    ```bash
    # See: https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/
-   # Build with: USE_CUDA=1 USE_CUDNN=1 python setup.py install
    ```
 
 This project was tested with PyTorch 2.7.1a0 (built from source, CUDA 12.6).
@@ -60,14 +59,24 @@ mkdir -p output
 python test_tts.py "Hallo Welt"
 ```
 
-## Usage
+## Quick Start
 
-### Start Server
+### Option 1: Install as Service (recommended)
+
+```bash
+sudo ./install-service.sh
+```
+
+This installs and starts the systemd service automatically.
+
+### Option 2: Manual Start
 
 ```bash
 python tts_server.py
 # Server runs on http://0.0.0.0:5050
 ```
+
+## Usage
 
 ### API Endpoints
 
@@ -106,21 +115,24 @@ curl http://localhost:5050/health
 ./tts_client.sh "Text to speak" output.wav serena german
 ```
 
-## Systemd Service (Auto-Start)
+## Service Management
 
 ```bash
-# Copy and edit service file
-sudo cp qwen3-tts.service /etc/systemd/system/
-sudo nano /etc/systemd/system/qwen3-tts.service  # adjust paths and user!
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable qwen3-tts
-sudo systemctl start qwen3-tts
-
-# Check status
+# Status
 sudo systemctl status qwen3-tts
+
+# Restart
+sudo systemctl restart qwen3-tts
+
+# Logs
 sudo journalctl -u qwen3-tts -f
+
+# Stop
+sudo systemctl stop qwen3-tts
+
+# Uninstall
+sudo systemctl disable qwen3-tts
+sudo rm /etc/systemd/system/qwen3-tts.service
 ```
 
 ## Performance
@@ -145,6 +157,20 @@ All available: serena, vivian, uncle_fu, ryan, aiden, ono_anna, sohee, eric, dyl
 - **First request slow**: JIT compilation on first inference
 - **Long texts**: May take several minutes for long passages
 - **Flask dev server**: Not production-ready; consider gunicorn for production
+
+## Files
+
+```
+qwen3-tts/
+├── tts_server.py              # Flask HTTP Server
+├── tts_client.sh              # Shell client
+├── test_tts.py                # Standalone test
+├── install-service.sh         # Auto-installer for systemd
+├── qwen3-tts.service          # Production service (Ursula)
+├── qwen3-tts.service.template # Template for other setups
+├── requirements.txt
+└── README.md
+```
 
 ## License
 

@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=ursula
-WorkingDirectory=/home/ursula/projects/qwen3-tts
-ExecStart=/usr/bin/python3 /home/ursula/projects/qwen3-tts/tts_server.py
+User=YOUR_USER
+WorkingDirectory=/path/to/qwen3-tts
+ExecStart=/usr/bin/python3 /path/to/qwen3-tts/tts_server.py
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
