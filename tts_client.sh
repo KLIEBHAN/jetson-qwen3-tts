@@ -22,7 +22,7 @@ time curl -s -X POST "$SERVER/tts" \
 
 if [ -f "$OUTPUT" ] && [ -s "$OUTPUT" ]; then
     DURATION=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$OUTPUT" 2>/dev/null || echo "?")
-    SIZE=$(ls -lh "$OUTPUT" | awk "{print \$5}")
+    SIZE=$(wc -c < "$OUTPUT" | tr -d ' ')
     echo "Output: $OUTPUT ($SIZE, ${DURATION}s)"
 else
     echo "Error: No output or server not running"
