@@ -1,0 +1,15 @@
+[Unit]
+Description=Qwen3-TTS Server
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/path/to/qwen3-tts
+ExecStart=/usr/bin/python3 /path/to/qwen3-tts/tts_server.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
