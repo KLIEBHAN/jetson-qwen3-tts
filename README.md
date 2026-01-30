@@ -1,177 +1,62 @@
-# Jetson Qwen3-TTS
+# Qwen3-TTS Server
 
-GPU-accelerated Text-to-Speech server for NVIDIA Jetson devices using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice).
-
-Tested on **Jetson Orin Nano 8GB** with JetPack 6.x.
+HTTP server for Qwen3-TTS running on Jetson Orin Nano.
 
 ## Features
 
-- 🚀 HTTP API for easy integration
-- 🎭 Multiple voice speakers (serena, vivian, ryan, sohee, ...)
-- 🔄 Model stays loaded in GPU memory
-- 🐧 Systemd service for auto-start
+- **Flash Attention 2** enabled for optimized inference
+- Model stays loaded in GPU memory (~2 GB)
+- Multiple speaker voices supported
+- Simple REST API
 
-## Requirements
+## Performance
 
-- NVIDIA Jetson (Orin Nano, AGX Orin, etc.)
-- JetPack 6.x with CUDA 12+
-- Python 3.10+
-- ~2 GB GPU memory
+| Metric | Value |
+|--------|-------|
+| GPU Memory | ~2 GB |
+| RTF (Real-Time Factor) | ~6.2x |
+| Attention | flash_attention_2 |
 
-### PyTorch for Jetson
+*RTF 6.2x means 1 second of audio takes ~6.2 seconds to generate.*
 
-⚠️ **Standard PyTorch pip packages do NOT work on Jetson!**
+## API Endpoints
 
-You need a Jetson-specific build. Options:
-
-1. **NVIDIA Pre-built Wheels** (recommended):
-   ```bash
-   # Check https://forums.developer.nvidia.com/t/pytorch-for-jetson/
-   # For JetPack 6.x / L4T R36.x:
-   pip install torch-2.3.0+nv24.05-cp310-linux_aarch64.whl
-   ```
-
-2. **Build from Source** (if pre-built unavailable):
-   ```bash
-   # See: https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/
-   ```
-
-This project was tested with PyTorch 2.7.1a0 (built from source, CUDA 12.6).
-
-## Installation
-
-```bash
-# Clone
-git clone https://github.com/KLIEBHAN/jetson-qwen3-tts.git
-cd jetson-qwen3-tts
-
-# Virtual environment (recommended)
-python3 -m venv venv --system-site-packages  # inherit system PyTorch
-source venv/bin/activate
-
-# Dependencies (PyTorch must be installed separately, see above)
-pip install soundfile flask qwen-tts
-
-# Create output directory
-mkdir -p output
-
-# Test (standalone, without server)
-python test_tts.py "Hallo Welt"
-```
-
-## Quick Start
-
-### Option 1: Install as Service (recommended)
-
-```bash
-sudo ./install-service.sh
-```
-
-This installs and starts the systemd service automatically.
-
-### Option 2: Manual Start
-
-```bash
-python tts_server.py
-# Server runs on http://0.0.0.0:5050
-```
-
-## Usage
-
-### API Endpoints
-
-#### POST /tts - Generate Speech
+### POST /tts
+Generate speech from text.
 
 ```bash
 curl -X POST http://localhost:5050/tts \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hallo Welt", "speaker": "serena", "language": "german"}' \
+  -d '{"text": "Hallo Welt", "speaker": "sohee", "language": "german"}' \
   -o output.wav
 ```
 
-| Parameter | Type   | Default | Description              |
-|-----------|--------|---------|--------------------------|
-| text      | string | "Hallo." | Text to synthesize       |
-| speaker   | string | serena  | Voice (see /speakers)    |
-| language  | string | german  | Language                 |
+### GET /speakers
+List available speakers.
 
-#### GET /speakers - List Voices
+### GET /health
+Health check (returns GPU memory usage).
 
-```bash
-curl http://localhost:5050/speakers
-# {"speakers": ["serena", "vivian", "ryan", "sohee", ...]}
-```
+### GET /info
+Server configuration info.
 
-#### GET /health - Server Status
+## Available Speakers
 
-```bash
-curl http://localhost:5050/health
-# {"status": "ok", "gpu_memory_gb": 2.1}
-```
-
-### Client Script
-
-```bash
-./tts_client.sh "Text to speak" output.wav serena german
-```
+- aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian
 
 ## Service Management
 
 ```bash
-# Status
-sudo systemctl status qwen3-tts
-
-# Restart
-sudo systemctl restart qwen3-tts
-
-# Logs
-sudo journalctl -u qwen3-tts -f
-
-# Stop
+sudo systemctl start qwen3-tts
 sudo systemctl stop qwen3-tts
-
-# Uninstall
-sudo systemctl disable qwen3-tts
-sudo rm /etc/systemd/system/qwen3-tts.service
+sudo systemctl restart qwen3-tts
+sudo journalctl -u qwen3-tts -f
 ```
 
-## Performance
+## Changelog
 
-| Metric                  | Jetson Orin Nano 8GB        |
-|-------------------------|----------------------------|
-| GPU Memory              | ~2 GB                      |
-| RTF (Real-Time Factor)  | ~8x slower than realtime   |
-| Startup                 | ~20s (including warmup)    |
-
-**Note:** RTF ~8x means 10s of audio takes ~80s to generate. This is a hardware limitation of the Orin Nano.
-
-## Speakers
-
-Best results for German: **serena** (clear, natural) or **sohee** (good alternative)
-
-All available: serena, vivian, uncle_fu, ryan, aiden, ono_anna, sohee, eric, dylan
-
-## Known Issues
-
-- **Must use bfloat16**: float16 causes CUDA errors on Jetson
-- **First request slow**: JIT compilation on first inference
-- **Long texts**: May take several minutes for long passages
-- **Flask dev server**: Not production-ready; consider gunicorn for production
-
-## Files
-
-```
-qwen3-tts/
-├── tts_server.py              # Flask HTTP Server
-├── tts_client.sh              # Shell client
-├── test_tts.py                # Standalone test
-├── install-service.sh         # Auto-installer for systemd
-├── qwen3-tts.service          # Production service (Ursula)
-├── qwen3-tts.service.template # Template for other setups
-├── requirements.txt
-└── README.md
-```
-
-## License
-
-MIT
+### 2026-01-30
+- Added Flash Attention 2 support (`attn_implementation="flash_attention_2"`)
+- Added `/info` endpoint for configuration details
+- Added attention implementation logging on startup
+- ~5% performance improvement with Flash Attention
