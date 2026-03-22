@@ -97,8 +97,18 @@ Default war 2048 — zu wenig für längere Texte (Audio wird abgeschnitten).
 - **8GB shared RAM** — GPU und CPU teilen sich den Speicher
 - **Kein echtes Streaming** — Server gibt erst nach kompletter Generierung zurück
 - **Memory-Leak** — Nach Tagen Dauerbetrieb kann der Prozess einfrieren
-  → `tts-telegram.sh` hat Auto-Detection + Restart eingebaut
 - **Faster Engine braucht exklusiven GPU-Zugriff** — Whisper/Ollama vorher stoppen
+- **/health allein reicht nicht** — `gpu_memory_gb` kann okay aussehen, obwohl `MemAvailable` im shared RAM schon zu niedrig ist
+
+### OOM-Analyse (faster Engine)
+
+Die OOMs kamen **nicht primär vom Modellgewicht**, sondern von der Kombination aus:
+1. Jetson shared RAM (CPU + GPU teilen sich 7.44 GB)
+2. CUDA Graph private pools / statische Buffers
+3. zusätzlichem Quick-Test vor dem eigentlichen Request
+4. zu wenig `MemAvailable` im System-RAM
+
+**Wichtig:** `torch.cuda.memory_allocated()` alleine ist irreführend. Die kritische Metrik auf Jetson ist oft `MemAvailable`.
 
 ---
 
@@ -112,12 +122,20 @@ curl -s http://localhost:5050/health
 curl -s http://localhost:5050/info
 ```
 
-### Vor dem Start: VRAM freigeben
+### Vor dem Start: RAM/VRAM freigeben
 ```bash
 sudo systemctl stop whisper-server ollama
 echo 3 | sudo tee /proc/sys/vm/drop_caches
 sudo systemctl start qwen3-tts
 ```
+
+### Smarter Telegram-Pfad
+`tts-telegram.sh` erkennt jetzt die faster Engine und macht dann:
+- **kein Quick-Test-TTS** (spart shared RAM)
+- Preflight über `/health` + `/info`
+- Restart der ganzen TTS-Stack falls `MemAvailable < 2 GB`
+
+Damit werden OOMs bei Telegram-Voice deutlich seltener.
 
 ### Telegram Voice
 ```bash

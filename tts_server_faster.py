@@ -20,6 +20,28 @@ warnings.filterwarnings("ignore")
 
 from flask import Flask, request, send_file, jsonify
 
+
+def meminfo():
+    info = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                key, value = line.split(":", 1)
+                info[key] = int(value.strip().split()[0])  # kB
+    except Exception:
+        pass
+    return info
+
+
+def system_memory_snapshot():
+    info = meminfo()
+    return {
+        "mem_total_gb": round(info.get("MemTotal", 0) / 1024 / 1024, 2),
+        "mem_available_gb": round(info.get("MemAvailable", 0) / 1024 / 1024, 2),
+        "mem_free_gb": round(info.get("MemFree", 0) / 1024 / 1024, 2),
+        "swap_free_gb": round(info.get("SwapFree", 0) / 1024 / 1024, 2),
+    }
+
 app = Flask(__name__)
 model = None
 VALID_SPEAKERS = None
@@ -51,7 +73,8 @@ def load_model():
     VALID_SPEAKERS = set(model.model.model.get_supported_speakers())
 
     gpu_mem = torch.cuda.memory_allocated() / 1024**3
-    print(f"Model loaded! GPU: {gpu_mem:.2f} GB")
+    mem = system_memory_snapshot()
+    print(f"Model loaded! GPU: {gpu_mem:.2f} GB | MemAvailable: {mem['mem_available_gb']:.2f} GB")
     print(f"Speakers: {', '.join(sorted(VALID_SPEAKERS))}")
 
     # Warmup triggers CUDA graph capture
@@ -97,7 +120,13 @@ def tts():
         duration = len(wavs[0]) / sr
         rtf = elapsed / duration
         gpu_mem = torch.cuda.memory_allocated() / 1024**3
-        print(f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | text={len(text)} chars | VRAM={gpu_mem:.2f}GB")
+        gpu_reserved = torch.cuda.memory_reserved() / 1024**3
+        mem = system_memory_snapshot()
+        print(
+            f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | "
+            f"text={len(text)} chars | VRAM={gpu_mem:.2f}GB reserved={gpu_reserved:.2f}GB | "
+            f"MemAvailable={mem['mem_available_gb']:.2f}GB"
+        )
 
         vram_cleanup()
 
@@ -105,6 +134,9 @@ def tts():
         response.headers["X-Audio-Duration"] = f"{duration:.1f}"
         response.headers["X-Processing-Time"] = f"{elapsed:.1f}"
         response.headers["X-RTF"] = f"{rtf:.2f}"
+        response.headers["X-Torch-Allocated-GB"] = f"{gpu_mem:.2f}"
+        response.headers["X-Torch-Reserved-GB"] = f"{gpu_reserved:.2f}"
+        response.headers["X-MemAvailable-GB"] = f"{mem['mem_available_gb']:.2f}"
         return response
 
     except Exception as e:
@@ -122,16 +154,20 @@ def speakers():
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint."""
+    mem = system_memory_snapshot()
     return jsonify({
         "status": "ok",
+        "engine": "faster-qwen3-tts",
         "gpu_memory_gb": round(torch.cuda.memory_allocated() / 1024**3, 2),
-        "engine": "faster-qwen3-tts"
+        "gpu_reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 2),
+        **mem,
     })
 
 
 @app.route("/info", methods=["GET"])
 def info():
     """Return server configuration info."""
+    mem = system_memory_snapshot()
     return jsonify({
         "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
         "engine": "faster-qwen3-tts",
@@ -141,6 +177,8 @@ def info():
         "cuda_graphs": True,
         "max_new_tokens": MAX_NEW_TOKENS,
         "gpu_memory_gb": round(torch.cuda.memory_allocated() / 1024**3, 2),
+        "gpu_reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 2),
+        **mem,
         "speakers": sorted(VALID_SPEAKERS)
     })
 
