@@ -134,8 +134,9 @@ sudo systemctl start qwen3-tts
 - **kein Quick-Test-TTS** (spart shared RAM)
 - Preflight über `/health` + `/info`
 - Restart der ganzen TTS-Stack falls `MemAvailable < 2 GB`
+- **Legacy-Fallback**: wenn die faster Engine trotzdem scheitert, startet das Script einmalig `tts_server.py` auf Port 5052, generiert dort die WAV und stellt danach den faster Service wieder her
 
-Damit werden OOMs bei Telegram-Voice deutlich seltener.
+Damit werden OOMs bei Telegram-Voice deutlich seltener und es gibt einen echten Notanker.
 
 ### Telegram Voice
 ```bash
