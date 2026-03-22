@@ -31,8 +31,10 @@ ATTN_IMPLEMENTATION = None
 STARTUP_ERROR = None
 STARTED_AT = time.time()
 PROFILE = get_legacy_profile()
-VERSION = "legacy-0.2.0"
+VERSION = "legacy-0.3.0"
 APP_ENGINE = f"qwen-tts-legacy:{PROFILE.name}"
+WARMUP_STATE = "pending"
+LAST_WARMUP_AT = None
 
 
 def meminfo():
@@ -67,6 +69,8 @@ def runtime_snapshot():
         "engine": APP_ENGINE,
         "startup_error": STARTUP_ERROR,
         "uptime_s": round(time.time() - STARTED_AT, 1),
+        "warmup_state": WARMUP_STATE,
+        "last_warmup_at": LAST_WARMUP_AT,
     }
 
 
@@ -77,10 +81,56 @@ def vram_cleanup():
 
 
 
+def maybe_warmup(reason: str):
+    global WARMUP_STATE, LAST_WARMUP_AT
+
+    if model is None:
+        return False
+
+    mode = (PROFILE.warmup_mode or "minimal").lower()
+    if mode == "none":
+        WARMUP_STATE = "disabled"
+        return False
+    if WARMUP_STATE == "complete":
+        return False
+
+    print(
+        f"Warmup ({reason}) with mode={mode}, max_new_tokens={PROFILE.warmup_max_new_tokens}..."
+    )
+    WARMUP_STATE = "running"
+    start = time.time()
+    try:
+        model.generate_custom_voice(
+            text=PROFILE.warmup_text,
+            speaker=PROFILE.warmup_speaker,
+            language=PROFILE.warmup_language,
+            max_new_tokens=min(PROFILE.max_new_tokens, PROFILE.warmup_max_new_tokens),
+        )
+        elapsed = time.time() - start
+        vram_cleanup()
+        WARMUP_STATE = "complete"
+        LAST_WARMUP_AT = round(time.time() - STARTED_AT, 1)
+        ready = runtime_snapshot()
+        print(
+            f"Warmup done in {elapsed:.1f}s | GPU={ready['gpu_memory_gb']:.2f} GB reserved={ready['gpu_reserved_gb']:.2f} GB | MemAvailable={ready['mem_available_gb']:.2f} GB"
+        )
+        return True
+    except Exception as exc:
+        WARMUP_STATE = "failed"
+        print(f"Warmup failed ({reason}): {exc}")
+        vram_cleanup()
+        return False
+
+
+
 def load_model():
     global model, VALID_SPEAKERS, ATTN_IMPLEMENTATION, STARTUP_ERROR
     print(f"Loading Qwen3-TTS legacy model with profile={PROFILE.name}...")
-    print(f"Profile config: max_new_tokens={PROFILE.max_new_tokens}, non_streaming_mode={PROFILE.non_streaming_mode}, min_mem_available_gb={PROFILE.min_mem_available_gb}")
+    print(
+        f"Profile config: max_new_tokens={PROFILE.max_new_tokens}, non_streaming_mode={PROFILE.non_streaming_mode}, "
+        f"min_mem_available_gb={PROFILE.min_mem_available_gb}, warmup_mode={PROFILE.warmup_mode}, "
+        f"warmup_max_new_tokens={PROFILE.warmup_max_new_tokens}"
+    )
 
     model = Qwen3TTSModel.from_pretrained(
         MODEL_NAME,
@@ -97,12 +147,10 @@ def load_model():
         f"Model loaded! GPU={loaded['gpu_memory_gb']:.2f} GB reserved={loaded['gpu_reserved_gb']:.2f} GB | MemAvailable={loaded['mem_available_gb']:.2f} GB"
     )
     print(f"Speakers: {', '.join(sorted(VALID_SPEAKERS))}")
-    print("Warming up...")
-    model.generate_custom_voice(text=".", speaker=PROFILE.warmup_speaker, language=PROFILE.warmup_language)
-    vram_cleanup()
+    maybe_warmup("startup")
     ready = runtime_snapshot()
     print(
-        f"Ready! GPU={ready['gpu_memory_gb']:.2f} GB reserved={ready['gpu_reserved_gb']:.2f} GB | MemAvailable={ready['mem_available_gb']:.2f} GB"
+        f"Ready! GPU={ready['gpu_memory_gb']:.2f} GB reserved={ready['gpu_reserved_gb']:.2f} GB | MemAvailable={ready['mem_available_gb']:.2f} GB | warmup={ready['warmup_state']}"
     )
     STARTUP_ERROR = None
 
@@ -113,7 +161,8 @@ def tts():
     text = data.get("text", "Hallo.")
     speaker = data.get("speaker", PROFILE.warmup_speaker)
     language = data.get("language", PROFILE.warmup_language)
-    max_tokens = int(data.get("max_new_tokens", PROFILE.max_new_tokens))
+    requested_max_tokens = int(data.get("max_new_tokens", PROFILE.max_new_tokens))
+    max_tokens = min(requested_max_tokens, PROFILE.max_new_tokens)
 
     if VALID_SPEAKERS is None or model is None:
         return jsonify({"error": "Model not loaded", "startup_error": STARTUP_ERROR, **runtime_snapshot()}), 503
@@ -122,6 +171,7 @@ def tts():
     if not text or not text.strip():
         return jsonify({"error": "Empty text"}), 400
 
+    maybe_warmup("first_request")
     try:
         start = time.time()
         wavs, sr = model.generate_custom_voice(
@@ -141,7 +191,7 @@ def tts():
         rtf = elapsed / duration if duration else 0.0
         snapshot = runtime_snapshot()
         print(
-            f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | text={len(text)} chars | GPU={snapshot['gpu_memory_gb']:.2f}GB reserved={snapshot['gpu_reserved_gb']:.2f}GB | MemAvailable={snapshot['mem_available_gb']:.2f}GB"
+            f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | text={len(text)} chars | max_new_tokens={max_tokens} | GPU={snapshot['gpu_memory_gb']:.2f}GB reserved={snapshot['gpu_reserved_gb']:.2f}GB | MemAvailable={snapshot['mem_available_gb']:.2f}GB"
         )
 
         vram_cleanup()
@@ -153,6 +203,7 @@ def tts():
         response.headers["X-Torch-Reserved-GB"] = f"{snapshot['gpu_reserved_gb']:.2f}"
         response.headers["X-MemAvailable-GB"] = f"{snapshot['mem_available_gb']:.2f}"
         response.headers["X-Profile"] = PROFILE.name
+        response.headers["X-Warmup-State"] = snapshot["warmup_state"]
         return response
     except Exception as e:
         vram_cleanup()
@@ -180,6 +231,7 @@ def info():
         "dtype": "bfloat16",
         "profile": PROFILE.to_dict(),
         "non_streaming_mode": PROFILE.non_streaming_mode,
+        "warmup_state": WARMUP_STATE,
         **runtime_snapshot(),
         "speakers": sorted(VALID_SPEAKERS or []),
     })

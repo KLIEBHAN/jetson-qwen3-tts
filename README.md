@@ -8,6 +8,7 @@ Langtext-first HTTP-Server für [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
 - **Kein Chunking als Standard**: Texte werden am Stück verarbeitet
 - **Legacy nur als Sicherheitsnetz**: wenn `faster-large` wegen shared RAM / Startfehlern nicht tragfähig ist
 - **Jetson-spezifisch**: Preflight auf `MemAvailable`, nicht nur auf PyTorch-VRAM
+- **Weniger Startstress**: Warmup ist jetzt kontrollierbar und kann bei knappem RAM sauber verschoben werden
 
 ## Architektur
 
@@ -19,8 +20,9 @@ Telegram / lokale Clients
         |
         +--> tts_server_faster.py   [default: profile=large]
         |      - faster-qwen3-tts
-        |      - CUDA Graphs
-        |      - static cache via max_seq_len
+        |      - CUDA Graphs (kontrolliertes Warmup)
+        |      - statischer Cache via max_seq_len
+        |      - textlängenabhängiger MemAvailable-Preflight
         |      - langtext-first
         |
         `--> tts_server.py          [fallback]
@@ -31,8 +33,9 @@ Telegram / lokale Clients
 
 Zusätzlich nutzt `~/workspace/scripts/tts-telegram.sh` jetzt sauberes Routing:
 1. primär `faster-large`
-2. bei zu wenig `MemAvailable` oder Fehlern → temporärer `legacy`-Fallback
+2. bei zu wenig `MemAvailable` oder klarem Startup-Memory-Fehler → temporärer `legacy`-Fallback
 3. danach Wiederherstellung von `faster-large`
+4. keine unnötigen Restart-Loops bei bereits erkennbarem Speichermangel
 
 ## Profile statt Datei-Duplikate
 
@@ -40,30 +43,57 @@ Die Profile werden zentral in `tts_config.py` definiert.
 
 ### Faster-Profile
 
-| Profil | Zweck | `max_seq_len` | `max_new_tokens` | `min_mem_available_gb` |
-|---|---|---:|---:|---:|
-| `large` | **Standard für lange Texte** | 4096 | 4096 | 3.0 |
-| `small` | Debug / Notfall, nicht Standard | 2048 | 2048 | 2.0 |
+| Profil | Zweck | `max_seq_len` | `max_new_tokens` | `min_mem_available_gb` | Warmup |
+|---|---|---:|---:|---:|---|
+| `large` | **Standard für lange Texte** | 3584 | 4096 | 3.0 | `minimal` |
+| `small` | Debug / Notfall, nicht Standard | 2048 | 2048 | 2.0 | `minimal` |
 
 ### Legacy-Profil
 
-| Profil | Zweck | `max_new_tokens` | `non_streaming_mode` |
-|---|---|---:|---|
-| `fallback` | Sicherheitsnetz ohne CUDA Graphs | 4096 | `False` |
+| Profil | Zweck | `max_new_tokens` | `non_streaming_mode` | Warmup |
+|---|---|---:|---|---|
+| `fallback` | Sicherheitsnetz ohne CUDA Graphs | 4096 | `False` | `minimal` |
 
 ## Warum `faster-large`?
 
 `faster-qwen3-tts` nutzt CUDA Graph Capture und einen statischen Talker-Cache.
-Für lange Texte ist das auf Jetson der einzig sinnvolle Primärpfad, weil die Legacy-Engine bei langen Sequenzen massiv langsamer wird.
+Für lange Texte ist das auf Jetson der sinnvollste Primärpfad, weil die Legacy-Engine bei langen Sequenzen massiv langsamer wird.
 
 Wichtig ist dabei `max_seq_len`:
 - zu klein → lange Requests riskieren harte Grenzen / ineffiziente Nutzung
 - zu groß → mehr statischer Cache, höherer Druck auf shared RAM
 
-Für den Jetson-Use-Case ist `4096` der saubere Langtext-Default:
-- genug Puffer für echte Langtexte
-- noch klar als Profil parametrierbar
-- ohne zusätzliche Server-Dateien
+Der neue Default ist **3584 statt 4096**:
+- immer noch klar langtext-orientiert
+- etwas weniger statischer Cache / Startdruck
+- auf dem 8-GB-Jetson der pragmatischere Trade-off
+
+## Warmup / Startverhalten
+
+`tts_server_faster.py` hat jetzt ein kontrolliertes Warmup-Modell:
+- `QWEN3_TTS_WARMUP_MODE=minimal` (Default): kleiner Warmup statt aggressivem Start-Capture
+- `QWEN3_TTS_WARMUP_MODE=none`: kein Startup-Warmup; Capture bleibt bis zum ersten echten Request aus
+- `QWEN3_TTS_WARMUP_MAX_NEW_TOKENS`: begrenzt die Warmup-Last zusätzlich
+- `QWEN3_TTS_STARTUP_HEADROOM_GB`: zusätzlicher Sicherheitsabstand vor Warmup / Modellstart
+
+Wenn der Host zu knapp ist, wird Warmup sauber **deferred** statt den Start aggressiv weiter zu belasten.
+
+## Textlängenabhängiges Memory-Routing
+
+Im faster-Server wird der Request-Preflight nicht mehr nur mit einer starren Schwelle bewertet.
+
+Default für `large`:
+
+| Textlänge | erforderliches `MemAvailable` |
+|---|---:|
+| `<= 400` Zeichen | 1.6 GB |
+| `<= 1200` Zeichen | 2.2 GB |
+| `<= 2200` Zeichen | 2.8 GB |
+| `> 2200` Zeichen | 3.0 GB |
+
+Das verhindert zwei Extreme:
+- **zu aggressiv** für kurze/mittlere Texte
+- **zu optimistisch** für echte Langtexte
 
 ## Installation
 
@@ -84,8 +114,9 @@ sudo ./install-service.sh --profile small
 # Legacy explizit installieren
 sudo ./install-service.sh --legacy
 
-# Overrides
-sudo ./install-service.sh --max-seq-len 3584 --max-new-tokens 4096 --min-mem-gb 2.5
+# Langtext-sparsam, aber ohne Chunking als Standard
+sudo ./install-service.sh --max-seq-len 3584 --max-new-tokens 4096 --min-mem-gb 3.0 \
+  --warmup-mode minimal --warmup-max-new-tokens 192 --startup-headroom-gb 0.6
 ```
 
 ## Direkt starten
@@ -109,6 +140,10 @@ QWEN3_TTS_PROFILE=fallback python3 tts_server.py
 | `QWEN3_TTS_MAX_SEQ_LEN` | Override für statischen Faster-Cache |
 | `QWEN3_TTS_MAX_NEW_TOKENS` | Override für Generierungsgrenze |
 | `QWEN3_TTS_MIN_MEM_GB` | Preflight-Schwelle für `MemAvailable` |
+| `QWEN3_TTS_WARMUP_MODE` | Warmup-Steuerung (`minimal`, `none`) |
+| `QWEN3_TTS_WARMUP_MAX_NEW_TOKENS` | Obergrenze für Warmup-Generierung |
+| `QWEN3_TTS_STARTUP_HEADROOM_GB` | Zusätzlicher Sicherheitsabstand für Start/Warmup |
+| `QWEN3_TTS_ROUTE_SHORT_MEM_GB` ... `QWEN3_TTS_ROUTE_XLONG_MEM_GB` | Feintuning der textabhängigen Routing-Schwellen |
 | `PYTORCH_CUDA_ALLOC_CONF` | Standard: `expandable_segments:True` |
 
 ## API
@@ -130,6 +165,7 @@ Response-Header:
 - `X-Torch-Reserved-GB`
 - `X-MemAvailable-GB`
 - `X-Profile`
+- `X-Warmup-State`
 
 ### `GET /health`
 
@@ -140,11 +176,15 @@ Liefert jetzt Jetson-relevante Runtime-Werte:
 - `gpu_memory_gb`
 - `gpu_reserved_gb`
 - `startup_error`
+- `warmup_state`
 - `uptime_s`
 
 ### `GET /info`
 
-Liefert zusätzlich das vollständige Profil und die aktiven Server-Parameter.
+Liefert zusätzlich:
+- vollständiges Profil inkl. Routing-Schwellen
+- Warmup-Status
+- aktive Server-Parameter
 
 ## Benchmarks / Realität auf Jetson
 
@@ -153,37 +193,30 @@ Es gibt zwei Wahrheiten gleichzeitig:
 1. **Auf einem sauberen Jetson ist `faster-large` der richtige Pfad für lange Texte.**
 2. **Auf einem bereits belegten Jetson ist `MemAvailable` die harte Grenze.**
 
-Neu gemessene Langtext-Preflight-Läufe mit `faster-large` auf diesem Jetson:
+### Bereits dokumentierte Vorwerte aus sauberen Läufen
 
-| Zeichen | Ergebnis | MemAvailable vorher | Bemerkung |
-|---:|---|---:|---|
-| 1000 | 503 | 1.35 GB | sauber abgefangen, kein harter OOM |
-| 1500 | 503 | 1.35 GB | sauber abgefangen |
-| 2000 | 503 | 1.35 GB | sauber abgefangen |
-| 2500 | 503 | 1.35 GB | sauber abgefangen |
-| 3000 | 503 | 1.35 GB | sauber abgefangen |
+| Engine | Zeichen | Audio | Rechenzeit | RTF |
+|---|---:|---:|---:|---:|
+| faster | 493 | 33s | 57s | 1.72 |
+| faster | 911 | 69s | 118s | 1.71 |
+| legacy | 1251 | 82s | 493s | 6.0 |
+| legacy | 1485 | 112s | 697s | 6.2 |
 
-Das ist **kein Qualitätsproblem der Engine**, sondern eine ehrliche Jetson-Grenze unter Speicherdruck.
-Die Architektur reagiert jetzt korrekt: lieber sauber auf Legacy routen als OOM / Hänger.
+### Neue Validierung dieses Schritts
 
-Zusätzlicher Versuch mit abgesenkter Schwelle (`QWEN3_TTS_MIN_MEM_GB=1.0`) zeigte auf demselben Host bereits bei ~1000 Zeichen wieder `NvMap`-/Allocator-Fehler → bestätigt, dass der Default von 3.0 GB konservativ, aber sinnvoll ist.
+Auf dem Hostzustand dieser Session war `MemAvailable` teils nur noch **~0.7–1.0 GB**.
+Das ist absichtlich ein harter Test für Robustheit, nicht für Durchsatz.
 
-## Benchmark-Script
-
-```bash
-python3 benchmark_longtext.py
-```
-
-Output: `benchmark_results_longtext.json`
-
-Erfasst pro Lauf:
-- Zeichen
-- Erfolg / Fehler
-- Audio-Dauer
-- Rechenzeit
-- RTF
-- `MemAvailable` vorher / nachher
-- `gpu_reserved_gb` vorher / nachher
+Messbare Ergebnisse:
+- neuer `large`-Default startet bei Speichermangel sauber mit **klarer `startup_error`-Meldung** statt blindem Warmup-Druck
+- `/health` und `/info` zeigen jetzt zusätzlich `warmup_state`
+- textabhängige Schwellen ergeben für `large`:
+  - 100 Zeichen → 1.6 GB
+  - 1000 Zeichen → 2.2 GB
+  - 1500/2200 Zeichen → 2.8 GB
+  - 3000 Zeichen → 3.0 GB
+- bei extrem niedrigem RAM blieb das System in **degraded**, aber kontrolliert ansprechbar
+- der Wrapper kann bei explizitem Speichermangel jetzt direkt auf Legacy gehen, statt erst Restart-Schleifen zu drehen
 
 ## Telegram-Pfad
 
@@ -191,19 +224,19 @@ Wrapper: `~/workspace/scripts/tts-telegram.sh`
 
 Neues Routing:
 - prüft `/health` + `/info`
-- bevorzugt `faster-large`
-- routet bei niedrigem `MemAvailable` direkt auf temporären Legacy-Fallback
-- stellt danach `faster-large` wieder her
+- berücksichtigt Textlänge gegen die vom Server gelieferten Routing-Schwellen
+- vermeidet Restart-Stürme, wenn `startup_error` bereits auf `Insufficient MemAvailable` zeigt
+- nutzt Legacy nur temporär und stellt danach `faster-large` wieder her
 
 ## Wichtige Dateien
 
 | Datei | Zweck |
 |---|---|
-| `tts_config.py` | Zentrale Profil- und Env-Konfiguration |
+| `tts_config.py` | Zentrale Profil-, Warmup- und Routing-Konfiguration |
 | `tts_server_faster.py` | Langtext-first Faster-Server |
 | `tts_server.py` | Legacy-Fallback-Server |
 | `benchmark_longtext.py` | Langtext-Benchmarking |
-| `install-service.sh` | Systemd-Installation mit Profilen |
+| `install-service.sh` | Systemd-Installation mit Profilen + Warmup-Optionen |
 | `JETSON_NOTES.md` | Detaillierte Jetson-Analyse |
 
 ## Lizenz

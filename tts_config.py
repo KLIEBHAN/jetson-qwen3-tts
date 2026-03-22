@@ -13,6 +13,20 @@ PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
 
 
 @dataclass(frozen=True)
+class RoutingThresholds:
+    short_chars: int = 400
+    medium_chars: int = 1200
+    long_chars: int = 2200
+    short_mem_gb: float = 1.6
+    medium_mem_gb: float = 2.2
+    long_mem_gb: float = 2.8
+    xlong_mem_gb: float = 3.0
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ServerProfile:
     name: str
     engine: str
@@ -24,9 +38,16 @@ class ServerProfile:
     warmup_speaker: str = "sohee"
     warmup_language: str = "german"
     min_mem_available_gb: float = 0.0
+    warmup_mode: str = "minimal"
+    warmup_max_new_tokens: int = 256
+    startup_mem_headroom_gb: float = 0.5
+    routing: RoutingThresholds | None = None
 
     def to_dict(self) -> Dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        if self.routing is not None:
+            data["routing"] = self.routing.to_dict()
+        return data
 
 
 FASTER_PROFILES: Dict[str, ServerProfile] = {
@@ -35,8 +56,20 @@ FASTER_PROFILES: Dict[str, ServerProfile] = {
         engine="faster-qwen3-tts",
         description="Langtext-first Profil für Jetson. Primärer Pfad für ~1k-3k Zeichen.",
         max_new_tokens=4096,
-        max_seq_len=4096,
+        max_seq_len=3584,
         min_mem_available_gb=3.0,
+        warmup_mode="minimal",
+        warmup_max_new_tokens=192,
+        startup_mem_headroom_gb=0.6,
+        routing=RoutingThresholds(
+            short_chars=400,
+            medium_chars=1200,
+            long_chars=2200,
+            short_mem_gb=1.6,
+            medium_mem_gb=2.2,
+            long_mem_gb=2.8,
+            xlong_mem_gb=3.0,
+        ),
     ),
     "small": ServerProfile(
         name="small",
@@ -45,6 +78,18 @@ FASTER_PROFILES: Dict[str, ServerProfile] = {
         max_new_tokens=2048,
         max_seq_len=2048,
         min_mem_available_gb=2.0,
+        warmup_mode="minimal",
+        warmup_max_new_tokens=128,
+        startup_mem_headroom_gb=0.4,
+        routing=RoutingThresholds(
+            short_chars=400,
+            medium_chars=1000,
+            long_chars=1800,
+            short_mem_gb=1.4,
+            medium_mem_gb=1.8,
+            long_mem_gb=2.0,
+            xlong_mem_gb=2.2,
+        ),
     ),
 }
 
@@ -56,6 +101,8 @@ LEGACY_PROFILES: Dict[str, ServerProfile] = {
         max_new_tokens=4096,
         non_streaming_mode=False,
         min_mem_available_gb=1.0,
+        warmup_mode="minimal",
+        warmup_max_new_tokens=64,
     )
 }
 
@@ -76,6 +123,47 @@ def env_float(name: str, default: float) -> float:
 
 
 
+def env_str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip()
+
+
+
+def build_routing_thresholds(defaults: RoutingThresholds | None) -> RoutingThresholds | None:
+    if defaults is None:
+        return None
+    return RoutingThresholds(
+        short_chars=env_int("QWEN3_TTS_ROUTE_SHORT_CHARS", defaults.short_chars),
+        medium_chars=env_int("QWEN3_TTS_ROUTE_MEDIUM_CHARS", defaults.medium_chars),
+        long_chars=env_int("QWEN3_TTS_ROUTE_LONG_CHARS", defaults.long_chars),
+        short_mem_gb=env_float("QWEN3_TTS_ROUTE_SHORT_MEM_GB", defaults.short_mem_gb),
+        medium_mem_gb=env_float("QWEN3_TTS_ROUTE_MEDIUM_MEM_GB", defaults.medium_mem_gb),
+        long_mem_gb=env_float("QWEN3_TTS_ROUTE_LONG_MEM_GB", defaults.long_mem_gb),
+        xlong_mem_gb=env_float("QWEN3_TTS_ROUTE_XLONG_MEM_GB", defaults.xlong_mem_gb),
+    )
+
+
+
+def get_required_mem_available_gb(profile: ServerProfile, text_chars: int | None = None) -> float:
+    if text_chars is None or profile.routing is None:
+        return profile.min_mem_available_gb
+
+    routing = profile.routing
+    if text_chars <= routing.short_chars:
+        required = routing.short_mem_gb
+    elif text_chars <= routing.medium_chars:
+        required = routing.medium_mem_gb
+    elif text_chars <= routing.long_chars:
+        required = routing.long_mem_gb
+    else:
+        required = routing.xlong_mem_gb
+
+    return min(profile.min_mem_available_gb, required)
+
+
+
 def get_faster_profile() -> ServerProfile:
     profile_name = os.environ.get("QWEN3_TTS_PROFILE", "large").strip().lower() or "large"
     profile = FASTER_PROFILES.get(profile_name)
@@ -90,6 +178,14 @@ def get_faster_profile() -> ServerProfile:
             "min_mem_available_gb": env_float(
                 "QWEN3_TTS_MIN_MEM_GB", profile.min_mem_available_gb
             ),
+            "warmup_mode": env_str("QWEN3_TTS_WARMUP_MODE", profile.warmup_mode).lower(),
+            "warmup_max_new_tokens": env_int(
+                "QWEN3_TTS_WARMUP_MAX_NEW_TOKENS", profile.warmup_max_new_tokens
+            ),
+            "startup_mem_headroom_gb": env_float(
+                "QWEN3_TTS_STARTUP_HEADROOM_GB", profile.startup_mem_headroom_gb
+            ),
+            "routing": build_routing_thresholds(profile.routing),
         }
     )
 
@@ -104,6 +200,10 @@ def get_legacy_profile() -> ServerProfile:
             "non_streaming_mode": os.environ.get("QWEN3_TTS_NON_STREAMING_MODE", str(profile.non_streaming_mode)).lower() == "true",
             "min_mem_available_gb": env_float(
                 "QWEN3_TTS_MIN_MEM_GB", profile.min_mem_available_gb
+            ),
+            "warmup_mode": env_str("QWEN3_TTS_WARMUP_MODE", profile.warmup_mode).lower(),
+            "warmup_max_new_tokens": env_int(
+                "QWEN3_TTS_WARMUP_MAX_NEW_TOKENS", profile.warmup_max_new_tokens
             ),
         }
     )
