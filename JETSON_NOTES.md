@@ -126,6 +126,30 @@ sudo journalctl -u qwen3-tts -f     # Live-Logs
 
 ---
 
+## faster-qwen3-tts Engine (empfohlen)
+
+**3.5x schneller** durch CUDA Graph Capture — `pip install faster-qwen3-tts`
+
+### Wie es funktioniert
+Statt bei jedem Token einen separaten CUDA-Kernel-Launch zu machen, captured `faster-qwen3-tts` 
+den Berechnungsgraph einmalig beim Warmup. Folgeaufrufe laufen dann über den statischen Graph → 
+minimal Overhead, konstanter RTF unabhängig von der Textlänge.
+
+### Performance-Vergleich
+
+| Engine | Zeichen | Audio | Rechenzeit | RTF |
+|--------|---------|-------|-----------|-----|
+| qwen-tts (alt) | 493 | 32s | 197s | ~6.0 |
+| **faster-qwen3-tts** | 493 | 32s | 57s | **1.72** |
+| qwen-tts (alt) | 1079 | 61s | 493s | ~6.0 |
+| **faster-qwen3-tts** | 911 | 69s | 118s | **1.71** |
+
+### Einschränkung
+Braucht mehr freien VRAM beim Laden (~5GB frei nötig). Whisper/Ollama müssen gestoppt sein.
+Server: `tts_server_faster.py` (Standard-Service nutzt das automatisch).
+
+---
+
 ## Changelog
 
 ### 2026-03-22
@@ -135,6 +159,8 @@ sudo journalctl -u qwen3-tts -f     # Live-Logs
 - `non_streaming_mode=False` gegen OOM bei langen Texten
 - `max_new_tokens` 2048 → 4096
 - VRAM-Cleanup nach Warmup und im Error-Handler
+- **faster-qwen3-tts 0.2.4** — CUDA Graph Capture, **3.5x Speedup** (RTF 6.0 → 1.72)
+- `tts_server_faster.py` als neuer Standard-Server
 
 ---
 
