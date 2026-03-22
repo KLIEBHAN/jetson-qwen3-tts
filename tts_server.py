@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Qwen3-TTS HTTP Server
-Keeps model loaded in GPU memory for fast inference.
-Optimized for Jetson Orin Nano (8GB shared memory).
+Qwen3-TTS HTTP Server — Standard/Legacy Edition
+Fallback server using plain qwen-tts (no CUDA graphs).
+Use tts_server_faster.py for 3.5x better performance.
 
+Optimized for Jetson Orin Nano (8GB shared memory).
 Uses SDPA attention (flash_attention_2 has kernel issues on Jetson sm_87).
 Uses non_streaming_mode=False to reduce peak VRAM for long texts.
 """

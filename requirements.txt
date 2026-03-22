@@ -1,5 +1,6 @@
-# PyTorch must be installed separately for Jetson - see README.md
+# PyTorch must be installed separately for Jetson — see NVIDIA docs
 # pip install these after PyTorch is working:
+faster-qwen3-tts>=0.2.4
+qwen-tts>=0.1.1
 soundfile
 flask
-qwen-tts
