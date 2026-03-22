@@ -264,7 +264,9 @@ def health():
 
 @app.route("/info", methods=["GET"])
 def info():
+    snapshot = runtime_snapshot()
     return jsonify({
+        **snapshot,
         "model": MODEL_NAME,
         "engine": APP_ENGINE,
         "version": VERSION,
@@ -273,7 +275,6 @@ def info():
         "cuda_graphs": True,
         "profile": PROFILE.to_dict(),
         "warmup_state": WARMUP_STATE,
-        **runtime_snapshot(),
         "speakers": sorted(VALID_SPEAKERS or []),
     })
 

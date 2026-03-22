@@ -224,7 +224,9 @@ def health():
 
 @app.route("/info", methods=["GET"])
 def info():
+    snapshot = runtime_snapshot()
     return jsonify({
+        **snapshot,
         "model": MODEL_NAME,
         "version": VERSION,
         "attention": ATTN_IMPLEMENTATION,
@@ -232,7 +234,6 @@ def info():
         "profile": PROFILE.to_dict(),
         "non_streaming_mode": PROFILE.non_streaming_mode,
         "warmup_state": WARMUP_STATE,
-        **runtime_snapshot(),
         "speakers": sorted(VALID_SPEAKERS or []),
     })
 

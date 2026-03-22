@@ -130,7 +130,13 @@ Auch die Legacy-Engine hat jetzt konsistente Warmup-/Health-Felder:
 2. textabhängige RAM-Schwelle aus dem Serverprofil ableiten
 3. wenn faster gesund **und** genug RAM für genau diesen Text vorhanden → direkt dort generieren
 4. wenn `startup_error` bereits klar auf Speichermangel zeigt → **kein unnötiger Restart**, direkt auf temporären Legacy-Fallback
-5. nach dem Fallback `faster-large` wiederherstellen
+5. vor Legacy-Start einen evtl. hängengebliebenen alten Fallback-Prozess auf dem Fallback-Port gezielt aufräumen
+6. nach dem Fallback `faster-large` wiederherstellen
+
+Zusätzlich gilt jetzt explizit:
+- ein allgemeiner Faster-Neustart stoppt **nicht mehr pauschal Whisper/Ollama**
+- das aggressive Freiräumen bleibt auf echte Memory-Notfälle begrenzt
+- die Wiederherstellung von `faster-large` ist **best effort**: unter weiter bestehendem Speicherdruck kann der Dienst sauber degradiert bleiben, bis wieder genug `MemAvailable` vorhanden ist
 
 ### Warum das besser ist
 
