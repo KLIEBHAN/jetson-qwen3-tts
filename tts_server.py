@@ -2,13 +2,21 @@
 """
 Qwen3-TTS HTTP Server
 Keeps model loaded in GPU memory for fast inference.
-Supports Flash Attention 2 for optimized performance.
+Optimized for Jetson Orin Nano (8GB shared memory).
+
+Uses SDPA attention (flash_attention_2 has kernel issues on Jetson sm_87).
+Uses non_streaming_mode=False to reduce peak VRAM for long texts.
 """
+
+import os
+# Reduce CUDA memory fragmentation on shared-memory devices (Jetson)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import soundfile as sf
 import io
 import time
+import gc
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -20,9 +28,19 @@ model = None
 VALID_SPEAKERS = None
 ATTN_IMPLEMENTATION = None
 
+# Generation defaults optimized for Jetson 8GB
+MAX_NEW_TOKENS = 4096  # default 2048 limits audio length
+NON_STREAMING_MODE = False  # simulates streaming text input → lower peak VRAM
+
+
+def vram_cleanup():
+    """Free GPU memory after inference."""
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
 def load_model():
-    """Load Qwen3-TTS model with Flash Attention 2."""
+    """Load Qwen3-TTS model with SDPA attention."""
     global model, VALID_SPEAKERS, ATTN_IMPLEMENTATION
     
     print("Loading Qwen3-TTS model...")
@@ -30,7 +48,7 @@ def load_model():
         "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
         torch_dtype=torch.bfloat16,
         device_map="cuda",
-        attn_implementation="flash_attention_2"
+        attn_implementation="sdpa"
     )
     
     VALID_SPEAKERS = set(model.model.get_supported_speakers())
@@ -43,10 +61,13 @@ def load_model():
     print(f"Model loaded! GPU: {gpu_mem:.2f} GB")
     print(f"Attention: {ATTN_IMPLEMENTATION}")
     print(f"Speakers: {', '.join(sorted(VALID_SPEAKERS))}")
+    print(f"max_new_tokens: {MAX_NEW_TOKENS}")
+    print(f"non_streaming_mode: {NON_STREAMING_MODE}")
     
     # Warmup (first inference is slow due to CUDA compilation)
     print("Warming up...")
     model.generate_custom_voice(text=".", speaker="serena", language="german")
+    vram_cleanup()
     print("Ready!")
 
 
@@ -57,6 +78,7 @@ def tts():
     text = data.get("text", "Hallo.")
     speaker = data.get("speaker", "serena")
     language = data.get("language", "german")
+    max_tokens = data.get("max_new_tokens", MAX_NEW_TOKENS)
     
     if speaker not in VALID_SPEAKERS:
         return jsonify({
@@ -70,7 +92,11 @@ def tts():
     try:
         start = time.time()
         wavs, sr = model.generate_custom_voice(
-            text=text, speaker=speaker, language=language
+            text=text,
+            speaker=speaker,
+            language=language,
+            non_streaming_mode=NON_STREAMING_MODE,
+            max_new_tokens=max_tokens,
         )
         elapsed = time.time() - start
         
@@ -80,10 +106,20 @@ def tts():
         
         duration = len(wavs[0]) / sr
         rtf = elapsed / duration
-        print(f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f})")
+        gpu_mem = torch.cuda.memory_allocated() / 1024**3
+        print(f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | text={len(text)} chars | VRAM={gpu_mem:.2f}GB")
         
-        return send_file(buf, mimetype="audio/wav")
+        vram_cleanup()
+        
+        response = send_file(buf, mimetype="audio/wav")
+        response.headers["X-Audio-Duration"] = f"{duration:.1f}"
+        response.headers["X-Processing-Time"] = f"{elapsed:.1f}"
+        response.headers["X-RTF"] = f"{rtf:.2f}"
+        return response
+        
     except Exception as e:
+        vram_cleanup()
+        print(f"TTS ERROR: {e} | text={len(text)} chars")
         return jsonify({"error": str(e)}), 500
 
 
@@ -107,8 +143,11 @@ def info():
     """Return server configuration info."""
     return jsonify({
         "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "version": "0.1.1",
         "attention": ATTN_IMPLEMENTATION,
         "dtype": "bfloat16",
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "non_streaming_mode": NON_STREAMING_MODE,
         "gpu_memory_gb": round(torch.cuda.memory_allocated() / 1024**3, 2),
         "speakers": sorted(VALID_SPEAKERS)
     })
