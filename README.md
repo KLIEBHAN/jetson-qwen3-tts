@@ -1,109 +1,211 @@
 # Qwen3-TTS Server for Jetson
 
-HTTP server for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) on NVIDIA Jetson Orin Nano.  
-Uses [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) with CUDA Graph Capture for **3.5x faster inference**.
+Langtext-first HTTP-Server für [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) auf NVIDIA Jetson Orin Nano.
 
-## Performance
+## Zielbild
 
-| Metric | Value |
-|--------|-------|
-| GPU Memory | ~2.3 GB |
-| RTF (Real-Time Factor) | **~1.7x** |
-| Engine | faster-qwen3-tts + CUDA Graphs |
-| Attention | SDPA |
-| Dtype | bfloat16 |
+- **Lange Texte zuerst**: Der Standardpfad ist `faster-large`
+- **Kein Chunking als Standard**: Texte werden am Stück verarbeitet
+- **Legacy nur als Sicherheitsnetz**: wenn `faster-large` wegen shared RAM / Startfehlern nicht tragfähig ist
+- **Jetson-spezifisch**: Preflight auf `MemAvailable`, nicht nur auf PyTorch-VRAM
 
-*RTF 1.7x means 10 seconds of audio takes ~17 seconds to generate.*
+## Architektur
 
-## Quick Start
+```text
+Telegram / lokale Clients
+        |
+        v
+  qwen3-tts service (Port 5050)
+        |
+        +--> tts_server_faster.py   [default: profile=large]
+        |      - faster-qwen3-tts
+        |      - CUDA Graphs
+        |      - static cache via max_seq_len
+        |      - langtext-first
+        |
+        `--> tts_server.py          [fallback]
+               - qwen-tts legacy
+               - ohne CUDA Graphs
+               - langsamer, aber robuster
+```
+
+Zusätzlich nutzt `~/workspace/scripts/tts-telegram.sh` jetzt sauberes Routing:
+1. primär `faster-large`
+2. bei zu wenig `MemAvailable` oder Fehlern → temporärer `legacy`-Fallback
+3. danach Wiederherstellung von `faster-large`
+
+## Profile statt Datei-Duplikate
+
+Die Profile werden zentral in `tts_config.py` definiert.
+
+### Faster-Profile
+
+| Profil | Zweck | `max_seq_len` | `max_new_tokens` | `min_mem_available_gb` |
+|---|---|---:|---:|---:|
+| `large` | **Standard für lange Texte** | 4096 | 4096 | 3.0 |
+| `small` | Debug / Notfall, nicht Standard | 2048 | 2048 | 2.0 |
+
+### Legacy-Profil
+
+| Profil | Zweck | `max_new_tokens` | `non_streaming_mode` |
+|---|---|---:|---|
+| `fallback` | Sicherheitsnetz ohne CUDA Graphs | 4096 | `False` |
+
+## Warum `faster-large`?
+
+`faster-qwen3-tts` nutzt CUDA Graph Capture und einen statischen Talker-Cache.
+Für lange Texte ist das auf Jetson der einzig sinnvolle Primärpfad, weil die Legacy-Engine bei langen Sequenzen massiv langsamer wird.
+
+Wichtig ist dabei `max_seq_len`:
+- zu klein → lange Requests riskieren harte Grenzen / ineffiziente Nutzung
+- zu groß → mehr statischer Cache, höherer Druck auf shared RAM
+
+Für den Jetson-Use-Case ist `4096` der saubere Langtext-Default:
+- genug Puffer für echte Langtexte
+- noch klar als Profil parametrierbar
+- ohne zusätzliche Server-Dateien
+
+## Installation
 
 ```bash
-# Install dependencies (PyTorch for Jetson must be installed separately)
 pip install -r requirements.txt
+sudo ./install-service.sh
+```
 
-# Install as systemd service
+### Varianten
+
+```bash
+# Standard: faster-large
 sudo ./install-service.sh
 
-# Or run directly
-python3 tts_server_faster.py
+# Optional: anderes faster-Profil
+sudo ./install-service.sh --profile small
+
+# Legacy explizit installieren
+sudo ./install-service.sh --legacy
+
+# Overrides
+sudo ./install-service.sh --max-seq-len 3584 --max-new-tokens 4096 --min-mem-gb 2.5
 ```
+
+## Direkt starten
+
+```bash
+# faster-large (Standard)
+QWEN3_TTS_PROFILE=large python3 tts_server_faster.py
+
+# faster-small (nur Debug)
+QWEN3_TTS_PROFILE=small python3 tts_server_faster.py
+
+# legacy fallback
+QWEN3_TTS_PROFILE=fallback python3 tts_server.py
+```
+
+## Wichtige Umgebungsvariablen
+
+| Variable | Zweck |
+|---|---|
+| `QWEN3_TTS_PROFILE` | Profilname (`large`, `small`, `fallback`) |
+| `QWEN3_TTS_MAX_SEQ_LEN` | Override für statischen Faster-Cache |
+| `QWEN3_TTS_MAX_NEW_TOKENS` | Override für Generierungsgrenze |
+| `QWEN3_TTS_MIN_MEM_GB` | Preflight-Schwelle für `MemAvailable` |
+| `PYTORCH_CUDA_ALLOC_CONF` | Standard: `expandable_segments:True` |
 
 ## API
 
-### POST /tts
-Generate speech from text.
+### `POST /tts`
 
 ```bash
 curl -X POST http://localhost:5050/tts \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hallo Welt", "speaker": "sohee", "language": "german"}' \
+  -d '{"text":"Hallo Welt","speaker":"sohee","language":"german"}' \
   -o output.wav
 ```
 
-**Parameters:**
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `text` | string | required | Text to synthesize |
-| `speaker` | string | `"sohee"` | Voice (see below) |
-| `language` | string | `"german"` | Language |
-| `max_new_tokens` | int | `4096` | Max audio tokens |
+Response-Header:
+- `X-Audio-Duration`
+- `X-Processing-Time`
+- `X-RTF`
+- `X-Torch-Allocated-GB`
+- `X-Torch-Reserved-GB`
+- `X-MemAvailable-GB`
+- `X-Profile`
 
-**Response headers:** `X-Audio-Duration`, `X-Processing-Time`, `X-RTF`
+### `GET /health`
 
-### GET /speakers
-List available voices.
+Liefert jetzt Jetson-relevante Runtime-Werte:
+- `engine`
+- `profile`
+- `mem_available_gb`
+- `gpu_memory_gb`
+- `gpu_reserved_gb`
+- `startup_error`
+- `uptime_s`
 
-### GET /health
-Health check + GPU memory usage.
+### `GET /info`
 
-### GET /info
-Full server configuration.
+Liefert zusätzlich das vollständige Profil und die aktiven Server-Parameter.
 
-## Speakers
+## Benchmarks / Realität auf Jetson
 
-`aiden` · `dylan` · `eric` · `ono_anna` · `ryan` · `serena` · `sohee` · `uncle_fu` · `vivian`
+Es gibt zwei Wahrheiten gleichzeitig:
 
-## Languages
+1. **Auf einem sauberen Jetson ist `faster-large` der richtige Pfad für lange Texte.**
+2. **Auf einem bereits belegten Jetson ist `MemAvailable` die harte Grenze.**
 
-Chinese · English · German · French · Japanese · Korean · Russian · Portuguese · Spanish · Italian
+Neu gemessene Langtext-Preflight-Läufe mit `faster-large` auf diesem Jetson:
 
-## Architecture
+| Zeichen | Ergebnis | MemAvailable vorher | Bemerkung |
+|---:|---|---:|---|
+| 1000 | 503 | 1.35 GB | sauber abgefangen, kein harter OOM |
+| 1500 | 503 | 1.35 GB | sauber abgefangen |
+| 2000 | 503 | 1.35 GB | sauber abgefangen |
+| 2500 | 503 | 1.35 GB | sauber abgefangen |
+| 3000 | 503 | 1.35 GB | sauber abgefangen |
 
-```
-tts_server_faster.py          ← HTTP API (Flask, port 5050)
-  └── faster-qwen3-tts        ← CUDA Graph inference engine
-       └── qwen-tts 0.1.1     ← Model loading & tokenization
-            └── Qwen3-TTS-12Hz-0.6B-CustomVoice (HuggingFace)
-```
+Das ist **kein Qualitätsproblem der Engine**, sondern eine ehrliche Jetson-Grenze unter Speicherdruck.
+Die Architektur reagiert jetzt korrekt: lieber sauber auf Legacy routen als OOM / Hänger.
 
-## Service Management
+Zusätzlicher Versuch mit abgesenkter Schwelle (`QWEN3_TTS_MIN_MEM_GB=1.0`) zeigte auf demselben Host bereits bei ~1000 Zeichen wieder `NvMap`-/Allocator-Fehler → bestätigt, dass der Default von 3.0 GB konservativ, aber sinnvoll ist.
+
+## Benchmark-Script
 
 ```bash
-sudo systemctl start qwen3-tts
-sudo systemctl stop qwen3-tts
-sudo systemctl restart qwen3-tts
-sudo journalctl -u qwen3-tts -f
+python3 benchmark_longtext.py
 ```
 
-**Note:** On Jetson 8GB, stop Whisper/Ollama before starting TTS to free VRAM.
+Output: `benchmark_results_longtext.json`
 
-## Files
+Erfasst pro Lauf:
+- Zeichen
+- Erfolg / Fehler
+- Audio-Dauer
+- Rechenzeit
+- RTF
+- `MemAvailable` vorher / nachher
+- `gpu_reserved_gb` vorher / nachher
 
-| File | Purpose |
-|------|---------|
-| `tts_server_faster.py` | HTTP server (faster engine, **recommended**) |
-| `tts_server.py` | HTTP server (standard qwen-tts, fallback) |
-| `install-service.sh` | Install as systemd service |
-| `JETSON_NOTES.md` | Detailed optimization notes & benchmarks |
+## Telegram-Pfad
 
-## Jetson-Specific Notes
+Wrapper: `~/workspace/scripts/tts-telegram.sh`
 
-See [JETSON_NOTES.md](JETSON_NOTES.md) for:
-- Full benchmark results
-- VRAM optimization details
-- Troubleshooting guide
-- Comparison: standard vs faster engine
+Neues Routing:
+- prüft `/health` + `/info`
+- bevorzugt `faster-large`
+- routet bei niedrigem `MemAvailable` direkt auf temporären Legacy-Fallback
+- stellt danach `faster-large` wieder her
 
-## License
+## Wichtige Dateien
+
+| Datei | Zweck |
+|---|---|
+| `tts_config.py` | Zentrale Profil- und Env-Konfiguration |
+| `tts_server_faster.py` | Langtext-first Faster-Server |
+| `tts_server.py` | Legacy-Fallback-Server |
+| `benchmark_longtext.py` | Langtext-Benchmarking |
+| `install-service.sh` | Systemd-Installation mit Profilen |
+| `JETSON_NOTES.md` | Detaillierte Jetson-Analyse |
+
+## Lizenz
 
 Apache-2.0

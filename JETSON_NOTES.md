@@ -1,172 +1,226 @@
-# Qwen3-TTS auf Jetson Orin Nano — Performance & Optimierungen
+# Qwen3-TTS auf Jetson Orin Nano — Langtext-first Notizen
 
 *Stand: 2026-03-22*
 
----
+## Kurzfazit
 
-## Konfiguration (aktuell)
+Für den Jetson-Orin-Nano-Use-Case ist die saubere Architektur jetzt:
+- **`faster-large` als Standard** für lange Texte
+- **Legacy als Fallback** bei Speicherdruck oder Startfehlern
+- **Preflight auf `MemAvailable`** statt blindem Vertrauen auf `torch.cuda.memory_allocated()`
 
-| Parameter | Wert |
-|-----------|------|
-| **Hardware** | Jetson Orin Nano 8GB (ARM64, shared GPU/CPU RAM) |
-| **Modell** | Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice |
-| **Engine** | faster-qwen3-tts 0.2.4 (CUDA Graph Capture) |
-| **qwen-tts** | 0.1.1 |
-| **Server** | `tts_server_faster.py` auf Port 5050 (Flask) |
-| **Attention** | SDPA |
-| **Dtype** | bfloat16 |
-| **CUDA Alloc** | `expandable_segments:True` |
-| **max_new_tokens** | 4096 |
-| **VRAM (Modell)** | ~2.3 GB |
-| **Stimmen** | aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian |
+## Warum diese Architektur?
 
----
+Der Jetson hat **8 GB shared RAM**. CPU und GPU teilen sich denselben Speicherpool.
+Darum reichen klassische CUDA-Metriken allein nicht aus.
 
-## Testergebnisse
+### Das eigentliche Problem
 
-### faster-qwen3-tts (aktuelle Engine)
+Die früheren OOM-/Startprobleme kamen nicht nur vom Modell selbst, sondern von der Kombination aus:
+1. shared RAM auf Jetson
+2. statischem Cache / CUDA-Graph-Pools der faster Engine
+3. zusätzlichem Warmup / Request-Overhead
+4. konkurrierenden Diensten wie Whisper
 
-| Zeichen | Audio | Rechenzeit | RTF | Speaker |
-|---------|-------|-----------|-----|---------|
-| 493 | 33s | 57s | **1.72** | sohee |
-| 911 | 69s | 118s | **1.71** | sohee |
+**Wichtig:** Ein System kann bei `torch.cuda.memory_allocated() ~2.5 GB` trotzdem faktisch zu knapp sein, weil `MemAvailable` schon kollabiert.
 
-### qwen-tts Standard (Legacy-Engine, zum Vergleich)
+## Profil-Design
 
-| Zeichen | Audio | Rechenzeit | RTF | Speaker |
-|---------|-------|-----------|-----|---------|
-| 493 | 8s | 54s | 6.8 | sohee |
-| 1251 | 82s | 493s | 6.0 | sohee |
-| 1363 | 86s | 515s | 6.0 | sohee |
-| 1485 | 112s | 697s | 6.2 | sohee |
-| 1691 | 135s | 810s | 6.0 | sohee |
-| 2090 | 140s | 841s | 6.0 | serena |
+### `faster-large` (neu: Primärpfad)
 
-### Hochrechnung (faster Engine)
+Ziel: realistischer Langtextbetrieb ohne Chunking als Default.
 
-| Zeichen | ~Audio | ~Rechenzeit |
-|---------|--------|-------------|
-| 500 | ~30s | ~55s |
-| 1000 | ~60s | ~2 Min |
-| 1500 | ~100s | ~3 Min |
-| 2000 | ~140s | ~4 Min |
+| Parameter | Wert | Begründung |
+|---|---:|---|
+| `max_seq_len` | 4096 | sinnvoller statischer Cache für lange Sequenzen |
+| `max_new_tokens` | 4096 | verhindert frühes Abschneiden längerer Ausgaben |
+| `min_mem_available_gb` | 3.0 | konservativer, aber stabiler Jetson-Preflight |
+| Attention | SDPA | Flash Attention 2 ist auf Jetson weiter problematisch |
+| Dtype | bfloat16 | guter Trade-off für Jetson |
 
----
+### Warum nicht noch größer?
 
-## Warum faster-qwen3-tts?
+Größerer `max_seq_len` bedeutet mehr statischen Cache.
+Das erhöht die Robustheit gegen lange Requests **nur dann**, wenn der Host genug freien shared RAM hat.
+Auf diesem Jetson kippt das Preis-Leistungs-Verhältnis schnell.
 
-Die Standard `qwen-tts` Library macht bei jedem Token einen separaten CUDA-Kernel-Launch. 
-Bei langen Texten werden das tausende Launches → der Overhead dominiert (RTF ~6x).
+Darum ist `4096` aktuell ein sauberer Langtext-Default:
+- klar langtext-orientiert
+- nicht künstlich klein
+- aber noch vertretbar im shared-RAM-Modell
 
-`faster-qwen3-tts` captured den Berechnungsgraph einmalig beim Warmup als CUDA Graph. 
-Alle folgenden Requests laufen über den statischen Graph → minimaler Overhead, **konstanter RTF ~1.7x**.
+### `small` nur optional
 
-### Trade-off
+Es gibt optional ein `small`-Profil (`2048 / 2048`) für Debug und Notfälle.
+Es wird bewusst **nicht** als Hauptpfad dokumentiert.
 
-| | Standard (`tts_server.py`) | Faster (`tts_server_faster.py`) |
-|---|---|---|
-| RTF | ~6.0 | **~1.7** |
-| VRAM beim Start | ~3 GB frei nötig | ~5 GB frei nötig |
-| Parallelbetrieb | Mit Whisper möglich | Whisper/Ollama müssen gestoppt sein |
-| Stabilität | Bewährt | Neu, CUDA Graphs können auf Jetson Eigenheiten haben |
+### `legacy:fallback`
 
----
+Die Legacy-Engine bleibt erhalten für:
+- Startfehler der faster Engine
+- knappen Speicher
+- temporäre Notfälle im Telegram-Pfad
 
-## Jetson-spezifische Optimierungen
+Sie ist langsamer, aber strukturell simpler.
 
-### 1. SDPA statt Flash Attention 2
-`flash_attention_2` hat mit qwen-tts ≥0.1.0 auf Jetson (CUDA sm_87) einen Kernel-Fehler:
-```
-RuntimeError: CUDA error: no kernel image is available for execution on the device
-```
-→ `attn_implementation="sdpa"` — PyTorch-native Alternative, gleiche Qualität.
+## Server-Refactor
 
-### 2. PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-Reduziert CUDA Memory Fragmentierung auf 8GB shared memory.
+### Neu eingeführt: `tts_config.py`
 
-### 3. gc.collect() + torch.cuda.empty_cache()
-Nach jeder Generierung und im Error-Handler. Gibt VRAM zurück an den Pool.
+Statt mehrere fast identische Serverdateien zu pflegen, sind die Parameter jetzt zentralisiert:
+- Faster-Profile
+- Legacy-Profil
+- Env-Overrides
 
-### 4. max_new_tokens=4096
-Default war 2048 — zu wenig für längere Texte (Audio wird abgeschnitten).
+Damit lassen sich Profil-Anpassungen sauber über Umgebungsvariablen fahren:
 
----
-
-## Bekannte Grenzen
-
-- **8GB shared RAM** — GPU und CPU teilen sich den Speicher
-- **Kein echtes Streaming** — Server gibt erst nach kompletter Generierung zurück
-- **Memory-Leak** — Nach Tagen Dauerbetrieb kann der Prozess einfrieren
-- **Faster Engine braucht exklusiven GPU-Zugriff** — Whisper/Ollama vorher stoppen
-- **/health allein reicht nicht** — `gpu_memory_gb` kann okay aussehen, obwohl `MemAvailable` im shared RAM schon zu niedrig ist
-
-### OOM-Analyse (faster Engine)
-
-Die OOMs kamen **nicht primär vom Modellgewicht**, sondern von der Kombination aus:
-1. Jetson shared RAM (CPU + GPU teilen sich 7.44 GB)
-2. CUDA Graph private pools / statische Buffers
-3. zusätzlichem Quick-Test vor dem eigentlichen Request
-4. zu wenig `MemAvailable` im System-RAM
-
-**Wichtig:** `torch.cuda.memory_allocated()` alleine ist irreführend. Die kritische Metrik auf Jetson ist oft `MemAvailable`.
-
----
-
-## Betrieb
-
-### Service-Management
 ```bash
-sudo systemctl status qwen3-tts
-sudo systemctl restart qwen3-tts   # ~70s (Modell + CUDA Graph Warmup)
-curl -s http://localhost:5050/health
-curl -s http://localhost:5050/info
+QWEN3_TTS_PROFILE=large
+QWEN3_TTS_MAX_SEQ_LEN=4096
+QWEN3_TTS_MAX_NEW_TOKENS=4096
+QWEN3_TTS_MIN_MEM_GB=3.0
 ```
 
-### Vor dem Start: RAM/VRAM freigeben
+### `tts_server_faster.py`
+
+Jetzt klar als **Langtext-first Server** strukturiert:
+- lädt Profil `large` standardmäßig
+- prüft Preflight beim Start
+- prüft Preflight auch vor jedem Request
+- gibt bei Speichermangel **503 + Routing-Hinweis** zurück statt hart zu crashen
+- liefert in `/health` und `/info` Jetson-relevante Werte
+
+### `tts_server.py`
+
+Jetzt klar als **Fallback-Engine** dokumentiert:
+- gleiche Observability-Felder (`engine`, `profile`, `startup_error`, Memory-Snapshot)
+- weiterhin ohne CUDA Graphs
+- nur Sicherheitsnetz, nicht Hauptpfad
+
+## Routing / Preflight im Telegram-Wrapper
+
+`~/workspace/scripts/tts-telegram.sh` wurde auf sauberes Routing umgebaut.
+
+### Neues Verhalten
+
+1. Status von `/health` und `/info` lesen
+2. wenn `faster-large` gesund **und** genug `MemAvailable` vorhanden → direkt dort generieren
+3. wenn `MemAvailable` zu niedrig oder faster Request fehlschlägt → temporären Legacy-Server starten
+4. WAV über Legacy erzeugen
+5. anschließend `faster-large` wiederherstellen
+
+### Warum das besser ist
+
+Vorher war der Fallback eher ein Notanker.
+Jetzt ist er ein definierter Teil der Architektur:
+- vorhersehbar
+- reversibel
+- ohne dauerhafte Umschaltung des Systems auf Legacy
+
+## Benchmarks
+
+### 1) Dokumentierte Vorwerte aus früheren sauberen Läufen
+
+#### faster-qwen3-tts
+
+| Zeichen | Audio | Rechenzeit | RTF |
+|---:|---:|---:|---:|
+| 493 | 33s | 57s | 1.72 |
+| 911 | 69s | 118s | 1.71 |
+
+Das bestätigt den grundsätzlichen Vorteil von `faster` für lange Texte.
+
+#### Legacy-Vergleichswerte
+
+| Zeichen | Audio | Rechenzeit | RTF |
+|---:|---:|---:|---:|
+| 1251 | 82s | 493s | 6.0 |
+| 1485 | 112s | 697s | 6.2 |
+| 1691 | 135s | 810s | 6.0 |
+| 2090 | 140s | 841s | 6.0 |
+
+### 2) Neue Langtext-Benchmarkserie (dieser Umbau)
+
+Datei: `benchmark_results_longtext.json`
+
+#### Messung A — Standard-Preflight (`faster-large`, `min_mem_available_gb=3.0`)
+
+Alle Zielgrößen wurden auf dem laufenden Jetson **sauber abgefangen**:
+
+| Zeichen | Erfolg | Audio | Rechenzeit | RTF | MemAvailable | Ergebnis |
+|---:|---|---:|---:|---:|---:|---|
+| 1000 | nein | – | – | – | 1.35 GB | HTTP 503 Preflight |
+| 1500 | nein | – | – | – | 1.35 GB | HTTP 503 Preflight |
+| 2000 | nein | – | – | – | 1.35 GB | HTTP 503 Preflight |
+| 2500 | nein | – | – | – | 1.35 GB | HTTP 503 Preflight |
+| 3000 | nein | – | – | – | 1.35 GB | HTTP 503 Preflight |
+
+**Interpretation:** Die neue Architektur verhält sich korrekt. Kein harter OOM, kein Hänger, sondern definierte Rückgabe an das Routing.
+
+#### Messung B — experimentell abgesenkte Schwelle (`QWEN3_TTS_MIN_MEM_GB=1.0`)
+
+Ziel war zu prüfen, ob man mit aggressiverem Routing noch echte Langtextläufe erzwingen kann.
+
+Ergebnis:
+- Server startete zwar noch
+- bereits beim ersten Langtextversuch traten `NvMapMemAllocInternalTagged ... error 12` auf
+- der Request endete mit HTTP 500
+
+**Interpretation:** Unter ~1.3-1.4 GB `MemAvailable` ist `faster-large` auf diesem Host nicht mehr verlässlich langtexttauglich.
+
+## Technische Grenze
+
+Die Grenze liegt aktuell nicht primär bei der Textlänge allein, sondern bei der Kombination aus:
+- `max_seq_len=4096`
+- CUDA Graph / static cache
+- aktueller Shared-RAM-Lage des Hosts
+- parallel laufenden Diensten
+
+### Ehrliche Aussage zur 3000-Zeichen-Frage
+
+**3000 Zeichen sind architektonisch das Ziel, aber nicht unter beliebigem Hostzustand garantiert.**
+
+Auf einem sauberen Jetson mit freigeräumtem Speicher ist das Profil dafür ausgelegt.
+Auf dem konkret gemessenen Hostzustand dieser Session war bereits der Einstieg in die Langtextgenerierung speicherseitig nicht mehr sauber tragfähig.
+
+Deshalb ist die Grenze derzeit praktisch:
+- **langtexttauglich auf freigeräumtem Host:** ja
+- **robust bei Speicherdruck:** nur mit sauberem Legacy-Fallback
+- **3000 Zeichen unter Last:** aktuell nicht ehrlich garantierbar
+
+## Install / Service
+
+`install-service.sh` unterstützt jetzt Profile und Overrides:
+
 ```bash
-sudo systemctl stop whisper-server ollama
-echo 3 | sudo tee /proc/sys/vm/drop_caches
-sudo systemctl start qwen3-tts
+sudo ./install-service.sh
+sudo ./install-service.sh --profile small
+sudo ./install-service.sh --legacy
+sudo ./install-service.sh --max-seq-len 3584 --max-new-tokens 4096 --min-mem-gb 2.5
 ```
 
-### Smarter Telegram-Pfad
-`tts-telegram.sh` erkennt jetzt die faster Engine und macht dann:
-- **kein Quick-Test-TTS** (spart shared RAM)
-- Preflight über `/health` + `/info`
-- Restart der ganzen TTS-Stack falls `MemAvailable < 2 GB`
-- **Legacy-Fallback**: wenn die faster Engine trotzdem scheitert, startet das Script einmalig `tts_server.py` auf Port 5052, generiert dort die WAV und stellt danach den faster Service wieder her
+## Empfehlung für den Betrieb
 
-Damit werden OOMs bei Telegram-Voice deutlich seltener und es gibt einen echten Notanker.
+### Für echte Langtexte
 
-### Telegram Voice
-```bash
-~/workspace/scripts/tts-telegram.sh "Text" <chat_id> [--reply-to <msg_id>]
-```
+1. `faster-large` als Standardservice laufen lassen
+2. Whisper / andere GPU-lastige Dienste vor Langtextjobs möglichst stoppen
+3. `MemAvailable` beobachten
+4. bei Preflight-503 kontrolliert auf Legacy routen
 
-### Monitoring
-```bash
-tegrastats                           # GPU/RAM/Temp
-sudo journalctl -u qwen3-tts -f     # Live-Logs
-```
+### Nicht tun
 
-### Fallback auf Legacy-Engine
-```bash
-sudo ./install-service.sh --legacy   # Nutzt tts_server.py
-```
+- Chunking als Standardlösung einbauen
+- mehrere fast identische Faster-Serverdateien pflegen
+- `gpu_memory_gb` als alleinige Wahrheit behandeln
 
----
+## Dateien
 
-## Changelog
-
-### 2026-03-22
-- **qwen-tts 0.0.5 → 0.1.1** — Neue Stimmen (ono_anna, uncle_fu)
-- Flash Attention 2 → SDPA (Jetson sm_87 Kompatibilität)
-- `expandable_segments:True` gegen CUDA-Fragmentierung
-- `max_new_tokens` 2048 → 4096
-- VRAM-Cleanup nach Warmup und im Error-Handler
-- **faster-qwen3-tts 0.2.4** — CUDA Graph Capture, **3.5x Speedup** (RTF 6.0 → 1.72)
-- `tts_server_faster.py` als neuer Standard-Server
-- Repo aufgeräumt: README neu, stale Files entfernt
+- `tts_config.py` — Profil-Definitionen
+- `tts_server_faster.py` — Langtext-first Faster-Server
+- `tts_server.py` — Legacy-Fallback
+- `benchmark_longtext.py` — Benchmark-Helfer
+- `benchmark_results_longtext.json` — letzte Messserie
 
 ---
 

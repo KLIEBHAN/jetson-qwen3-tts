@@ -1,21 +1,64 @@
 #!/bin/bash
 # Install Qwen3-TTS Server as systemd service
-# Usage: sudo ./install-service.sh [--legacy]
-#
-# Default: uses faster engine (tts_server_faster.py)
-# --legacy: uses standard engine (tts_server.py)
+# Usage:
+#   sudo ./install-service.sh                # faster-large (default)
+#   sudo ./install-service.sh --legacy       # legacy fallback engine
+#   sudo ./install-service.sh --profile small
 
-set -e
+set -euo pipefail
 
-USER="$(logname 2>/dev/null || echo $SUDO_USER)"
+USER="$(logname 2>/dev/null || echo ${SUDO_USER:-$USER})"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_FILE="/etc/systemd/system/qwen3-tts.service"
 
 SERVER="tts_server_faster.py"
-if [ "$1" = "--legacy" ]; then
-    SERVER="tts_server.py"
-    echo "Using legacy (standard) engine"
-fi
+PROFILE="large"
+MAX_SEQ_LEN=""
+MAX_NEW_TOKENS=""
+MIN_MEM_GB=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --legacy)
+            SERVER="tts_server.py"
+            PROFILE="fallback"
+            shift
+            ;;
+        --profile)
+            PROFILE="$2"
+            shift 2
+            ;;
+        --max-seq-len)
+            MAX_SEQ_LEN="$2"
+            shift 2
+            ;;
+        --max-new-tokens)
+            MAX_NEW_TOKENS="$2"
+            shift 2
+            ;;
+        --min-mem-gb)
+            MIN_MEM_GB="$2"
+            shift 2
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: sudo ./install-service.sh [options]
+
+Options:
+  --legacy                 Install legacy fallback engine
+  --profile <name>         Faster profile (default: large) or legacy profile fallback
+  --max-seq-len <n>        Override faster static cache length
+  --max-new-tokens <n>     Override generation cap
+  --min-mem-gb <gb>        Override minimum MemAvailable preflight threshold
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 if [ "$EUID" -ne 0 ]; then
     echo "Please run with sudo: sudo $0"
@@ -26,9 +69,10 @@ echo "Installing Qwen3-TTS Server service..."
 echo "  User:   $USER"
 echo "  Path:   $SCRIPT_DIR"
 echo "  Server: $SERVER"
+echo "  Profile: $PROFILE"
 echo
 
-cat > "$SERVICE_FILE" << EOF
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Qwen3-TTS Server
 After=network.target
@@ -41,6 +85,21 @@ ExecStart=/usr/bin/python3 $SCRIPT_DIR/$SERVER
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Environment=QWEN3_TTS_PROFILE=$PROFILE
+EOF
+
+if [ -n "$MAX_SEQ_LEN" ]; then
+    echo "Environment=QWEN3_TTS_MAX_SEQ_LEN=$MAX_SEQ_LEN" >> "$SERVICE_FILE"
+fi
+if [ -n "$MAX_NEW_TOKENS" ]; then
+    echo "Environment=QWEN3_TTS_MAX_NEW_TOKENS=$MAX_NEW_TOKENS" >> "$SERVICE_FILE"
+fi
+if [ -n "$MIN_MEM_GB" ]; then
+    echo "Environment=QWEN3_TTS_MIN_MEM_GB=$MIN_MEM_GB" >> "$SERVICE_FILE"
+fi
+
+cat >> "$SERVICE_FILE" <<'EOF'
 
 [Install]
 WantedBy=multi-user.target
@@ -48,11 +107,12 @@ EOF
 
 systemctl daemon-reload
 systemctl enable qwen3-tts
-systemctl start qwen3-tts
+systemctl restart qwen3-tts
 
 echo
 echo "✅ Qwen3-TTS Server installed and started!"
-echo "   Engine: $SERVER"
+echo "   Engine:  $SERVER"
+echo "   Profile: $PROFILE"
 echo
 echo "Commands:"
 echo "  sudo systemctl status qwen3-tts"
