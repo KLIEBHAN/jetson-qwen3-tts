@@ -1,0 +1,53 @@
+[
+  {
+    "chars": 1000,
+    "engine": "faster-qwen3-tts:large",
+    "profile": "large",
+    "mem_available_before_gb": 1.36,
+    "gpu_reserved_before_gb": 2.57,
+    "status": "http_500",
+    "error": "{\"engine\":\"faster-qwen3-tts:large\",\"error\":\"CUDA out of memory. Tried to allocate 72.00 MiB. GPU 0 has a total capacity of 7.44 GiB of which 1004.12 MiB is free. Of the allocated memory 2.80 GiB is allocated by PyTorch, with 55.88 MiB allocated in private pools (e.g., CUDA Graphs), and 72.84 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)\",\"gpu_memory_gb\":2.74,\"gpu_reserved_gb\":2.87,\"mem_available_gb\":1.04,\"mem_free_gb\":0.23,\"mem_total_gb\":7.44,\"profile\":\"large\",\"startup_error\":null,\"swap_free_gb\":49.91,\"uptime_s\":221.9}\n"
+  },
+  {
+    "chars": 1500,
+    "engine": "faster-qwen3-tts:large",
+    "profile": "large",
+    "mem_available_before_gb": 1.04,
+    "gpu_reserved_before_gb": 2.87,
+    "status": "ok",
+    "wav_bytes": 4646444,
+    "audio_duration_s": 96.8,
+    "processing_time_s": 213.7,
+    "wall_time_s": 214.11,
+    "rtf": 2.21,
+    "mem_available_after_gb": 0.48,
+    "gpu_reserved_after_gb": 2.59
+  },
+  {
+    "chars": 2000,
+    "engine": "faster-qwen3-tts:large",
+    "profile": "large",
+    "mem_available_before_gb": 0.48,
+    "gpu_reserved_before_gb": 2.59,
+    "status": "http_503",
+    "error": "{\"engine\":\"faster-qwen3-tts:large\",\"error\":\"Insufficient MemAvailable for faster inference\",\"gpu_memory_gb\":2.5,\"gpu_reserved_gb\":2.59,\"hint\":\"Route this request to the legacy fallback and retry faster later.\",\"mem_available_gb\":0.48,\"mem_free_gb\":0.14,\"mem_total_gb\":7.44,\"profile\":\"large\",\"required_mem_available_gb\":1.0,\"startup_error\":null,\"swap_free_gb\":49.9,\"uptime_s\":436.1}\n"
+  },
+  {
+    "chars": 2500,
+    "engine": "faster-qwen3-tts:large",
+    "profile": "large",
+    "mem_available_before_gb": 0.48,
+    "gpu_reserved_before_gb": 2.59,
+    "status": "http_503",
+    "error": "{\"engine\":\"faster-qwen3-tts:large\",\"error\":\"Insufficient MemAvailable for faster inference\",\"gpu_memory_gb\":2.5,\"gpu_reserved_gb\":2.59,\"hint\":\"Route this request to the legacy fallback and retry faster later.\",\"mem_available_gb\":0.48,\"mem_free_gb\":0.14,\"mem_total_gb\":7.44,\"profile\":\"large\",\"required_mem_available_gb\":1.0,\"startup_error\":null,\"swap_free_gb\":49.9,\"uptime_s\":436.1}\n"
+  },
+  {
+    "chars": 3000,
+    "engine": "faster-qwen3-tts:large",
+    "profile": "large",
+    "mem_available_before_gb": 0.48,
+    "gpu_reserved_before_gb": 2.59,
+    "status": "http_503",
+    "error": "{\"engine\":\"faster-qwen3-tts:large\",\"error\":\"Insufficient MemAvailable for faster inference\",\"gpu_memory_gb\":2.5,\"gpu_reserved_gb\":2.59,\"hint\":\"Route this request to the legacy fallback and retry faster later.\",\"mem_available_gb\":0.48,\"mem_free_gb\":0.14,\"mem_total_gb\":7.44,\"profile\":\"large\",\"required_mem_available_gb\":1.0,\"startup_error\":null,\"swap_free_gb\":49.9,\"uptime_s\":436.1}\n"
+  }
+]
