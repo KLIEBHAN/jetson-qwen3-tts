@@ -228,6 +228,7 @@ Wrapper: `~/workspace/scripts/tts-telegram.sh`
 
 Der Workspace-Wrapper ist jetzt absichtlich dünn und ruft das Repo-CLI `tts_telegram.py` auf.
 Die eigentliche Orchestrierung liegt damit zentral, testbar und ohne fragile Bash-JSON-/PID-Logik im Repository.
+Standardmäßig setzt der Wrapper jetzt `TTS_FREE_RAM_MIN_CHARS=1`, d. h. vor jedem Telegram-TTS-Run werden speicherstarke Nebenservices (vor allem Whisper, optional auch Ollama falls aktiv) pausiert und danach wieder gestartet.
 
 Neues Routing:
 - prüft `/health` + `/info`
