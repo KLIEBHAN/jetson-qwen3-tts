@@ -5,7 +5,8 @@
 ## Kurzfazit
 
 Für den Jetson-Orin-Nano-Use-Case ist die saubere Architektur jetzt:
-- **`faster-large` als Standard** für lange Texte
+- **`faster-small` als konservativer Dauer-Primärdienst auf Ursula**
+- **`faster-large` als Zielbild / Langtextpfad**, wenn genug `MemAvailable` vorhanden ist
 - **Legacy als Fallback** bei Speicherdruck oder Startfehlern
 - **Preflight auf `MemAvailable`** statt blindem Vertrauen auf `torch.cuda.memory_allocated()`
 - **kontrolliertes Warmup** statt unnötig aggressivem Startverhalten
@@ -28,9 +29,9 @@ Die OOM-/Startprobleme kommen nicht nur vom Modell selbst, sondern von der Kombi
 
 ## Profil-Design
 
-### `faster-large` (Primärpfad)
+### `faster-large` (Zielbild / Langtextpfad)
 
-Ziel: realistischer Langtextbetrieb ohne Chunking als Default.
+Ziel: realistischer Langtextbetrieb ohne Chunking, wenn der Hostzustand es zulässt.
 
 | Parameter | Wert | Begründung |
 |---|---:|---|
@@ -256,12 +257,13 @@ sudo ./install-service.sh \
 
 ## Empfehlung für den Betrieb
 
-### Für echte Langtexte
+### Für den aktuellen Produktionsbetrieb auf Ursula
 
-1. `faster-large` als Standardservice laufen lassen
-2. Whisper / Ollama vor großen Langtextjobs möglichst stoppen
-3. `MemAvailable` beobachten
-4. bei Preflight-503 oder klarem Startup-Memory-Fehler kontrolliert auf Legacy routen
+1. `faster-small` als Standardservice laufen lassen
+2. `faster-large` nicht als Dauerdefault erzwingen, sondern gezielt nur bei ausreichend freiem RAM nutzen
+3. Whisper / Ollama vor großen Langtextjobs möglichst stoppen
+4. `MemAvailable` beobachten
+5. bei Preflight-503 oder klarem Startup-Memory-Fehler kontrolliert auf small oder Legacy routen
 
 ### Nicht tun
 

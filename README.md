@@ -41,7 +41,7 @@ Die Profile werden zentral in `tts_config.py` definiert.
 | Profil | Zweck | `max_seq_len` | `max_new_tokens` | `min_mem_available_gb` |
 |---|---|---:|---:|---:|
 | `large` | Langtext-orientiert, aber auf diesem Host oft zu speicherhungrig | 3584 | 4096 | 3.0 |
-| `small` | konservativer Faster-Betrieb für den Primärdienst | 2048 | 2048 | 2.0 |
+| `small` | konservativer Faster-Primärpfad für Jetson-Bootstabilität | 1536 | 1536 | 1.8 |
 | `fallback` | Legacy-Sicherheitsnetz | – | 4096 | – |
 
 ## Installation
@@ -80,18 +80,20 @@ curl -X POST http://localhost:5050/tts \
 ### `GET /health`
 
 Liefert Runtime-Werte wie:
-- `engine`
-- `profile`
-- `mem_available_gb`
-- `gpu_memory_gb`
-- `gpu_reserved_gb`
-- `startup_error`
-- `warmup_state`
+- `engine`, `profile`
+- `mem_available_gb`, `gpu_memory_gb`, `gpu_reserved_gb`
+- `startup_error`, `warmup_state`
 - `busy`, `last_request_at`, `last_success_at`, `last_error`
+- `ready` (bool), `ready_reason` — echte Readiness-Semantik
+
+### `GET /ready`
+
+Readiness-Probe. Liefert `ready: true` erst nach erster erfolgreicher Inferenz.
+HTTP 200 = ready, HTTP 503 = not ready.
 
 ### `GET /info`
 
-Liefert zusätzlich das aktive Profil und Routing-Schwellen.
+Liefert zusätzlich das aktive Profil, Routing-Schwellen und `ready`/`ready_reason`.
 
 ## Produktionspfade
 
@@ -113,19 +115,15 @@ Liefert zusätzlich das aktive Profil und Routing-Schwellen.
 ```
 
 - pausiert standardmäßig Whisper vor dem Run
-- führt einen kleinen echten Smoke-Test aus
+- wartet auf TTS-Health (`/health` → `status=ok`)
 - startet `qwen3-tts` nur bei Bedarf neu
 - ist bewusst leichter als der Telegram-Orchestrator, folgt aber denselben Betriebsprinzipien
 
-### Smoke-Test / Readiness
+### Readiness
 
-```bash
-~/workspace/scripts/tts-smoke.sh
-```
-
-Das ist der echte kleine Request-Test. Auf diesem Jetson gilt:
-- `/health` = Dienst lebt
-- `tts-smoke.sh` = Dienst kann tatsächlich sprechen
+- `/health` → `status=ok` = Modell geladen (Liveness)
+- `/ready` → `ready=true` = erste Inferenz erfolgreich (Readiness)
+- `~/workspace/scripts/tts-smoke.sh` = manueller Request-Test
 
 ## Praxis auf Jetson
 

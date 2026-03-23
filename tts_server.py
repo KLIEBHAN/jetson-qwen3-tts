@@ -132,6 +132,46 @@ def maybe_warmup(reason: str):
 
 
 
+def is_ready_state() -> bool:
+    if model is None or STARTUP_ERROR is not None:
+        return False
+    mode = (PROFILE.warmup_mode or "minimal").lower()
+    if mode == "none":
+        return LAST_SUCCESS_AT is not None
+    return WARMUP_STATE == "complete" or LAST_SUCCESS_AT is not None
+
+
+
+def readiness_reason() -> str:
+    if STARTUP_ERROR is not None:
+        return "startup-error"
+    if model is None:
+        return "model-not-loaded"
+    mode = (PROFILE.warmup_mode or "minimal").lower()
+    if mode == "none" and LAST_SUCCESS_AT is None:
+        return "awaiting-first-success"
+    if WARMUP_STATE == "complete" or LAST_SUCCESS_AT is not None:
+        return "ready"
+    return f"warmup-{WARMUP_STATE}"
+
+
+
+def ensure_ready(reason: str) -> bool:
+    if is_ready_state():
+        return True
+    mode = (PROFILE.warmup_mode or "minimal").lower()
+    if mode == "none" or model is None or STARTUP_ERROR is not None:
+        return is_ready_state()
+    if INFER_LOCK.locked():
+        return False
+    with INFER_LOCK:
+        if is_ready_state():
+            return True
+        maybe_warmup(reason)
+    return is_ready_state()
+
+
+
 def load_model():
     global model, VALID_SPEAKERS, ATTN_IMPLEMENTATION, STARTUP_ERROR
     print(f"Loading Qwen3-TTS legacy model with profile={PROFILE.name}...")
@@ -236,7 +276,23 @@ def speakers():
 @app.route("/health", methods=["GET"])
 def health():
     status = "ok" if model is not None and STARTUP_ERROR is None else "degraded"
-    return jsonify({"status": status, **runtime_snapshot()})
+    return jsonify({
+        "status": status,
+        "ready": is_ready_state(),
+        "ready_reason": readiness_reason(),
+        **runtime_snapshot(),
+    })
+
+
+@app.route("/ready", methods=["GET"])
+def ready():
+    ready_now = ensure_ready("ready_probe")
+    status = 200 if ready_now else 503
+    return jsonify({
+        "ready": ready_now,
+        "ready_reason": readiness_reason(),
+        **runtime_snapshot(),
+    }), status
 
 
 @app.route("/info", methods=["GET"])
@@ -251,6 +307,8 @@ def info():
         "profile": PROFILE.to_dict(),
         "non_streaming_mode": PROFILE.non_streaming_mode,
         "warmup_state": WARMUP_STATE,
+        "ready": is_ready_state(),
+        "ready_reason": readiness_reason(),
         "speakers": sorted(VALID_SPEAKERS or []),
     })
 

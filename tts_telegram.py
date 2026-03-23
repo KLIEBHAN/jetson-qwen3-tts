@@ -117,7 +117,11 @@ def post_json_bytes(url: str, payload: dict[str, Any], timeout: int) -> tuple[by
 
 
 def snapshot_service(base_url: str) -> ServiceSnapshot:
-    return ServiceSnapshot(base_url=base_url, health=fetch_json(base_url + "/health"), info=fetch_json(base_url + "/info"))
+    return ServiceSnapshot(
+        base_url=base_url,
+        health=fetch_json(base_url + "/health"),
+        info=fetch_json(base_url + "/info"),
+    )
 
 
 def host_mem_available_gb() -> float:
