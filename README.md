@@ -87,9 +87,9 @@ Default für `large`:
 
 | Textlänge | erforderliches `MemAvailable` |
 |---|---:|
-| `<= 400` Zeichen | 1.6 GB |
-| `<= 1200` Zeichen | 2.2 GB |
-| `<= 2200` Zeichen | 2.8 GB |
+| `<= 400` Zeichen | 2.6 GB |
+| `<= 1200` Zeichen | 2.8 GB |
+| `<= 2200` Zeichen | 3.0 GB |
 | `> 2200` Zeichen | 3.0 GB |
 
 Das verhindert zwei Extreme:
@@ -229,7 +229,10 @@ Die eigentliche Orchestrierung liegt damit zentral, testbar und ohne fragile Bas
 Neues Routing:
 - prüft `/health` + `/info`
 - berücksichtigt Textlänge gegen die vom Server gelieferten Routing-Schwellen
+- nutzt bei healthy primary adaptiv `large -> small -> legacy`
+- behandelt unhealthy/degraded primary konservativ und geht direkt auf `legacy`, statt blind `small` zu erzwingen
 - vermeidet Restart-Stürme, wenn `startup_error` bereits auf `Insufficient MemAvailable` zeigt
+- kann optional vor Langtext RAM freimachen (Whisper/Ollama stoppen, Cache-Drop als Notfallmaßnahme)
 - nutzt Legacy nur temporär und stellt danach `faster-large` nur dann wieder her, wenn `MemAvailable` für den Startup-Pfad wieder stabil tragfähig ist
 - führt WAV→OGG und Telegram `sendVoice` im selben Python-Prozess aus
 

@@ -25,9 +25,11 @@ DEFAULT_RESTORE_HYSTERESIS_GB = float(os.environ.get("TTS_RESTORE_HYSTERESIS_GB"
 DEFAULT_SERVER = os.environ.get("TTS_SERVER", "http://127.0.0.1:5050").rstrip("/")
 DEFAULT_MAX_TIME = int(os.environ.get("TTS_MAX_TIME", "1800"))
 DEFAULT_LEGACY_PORT = int(os.environ.get("TTS_LEGACY_PORT", "5052"))
+DEFAULT_SMALL_PORT = int(os.environ.get("TTS_SMALL_PORT", "5053"))
 DEFAULT_TMPDIR = Path(os.environ.get("TMPDIR", "/tmp"))
 ROOT = Path(__file__).resolve().parent
 LEGACY_SERVER_SCRIPT = ROOT / "tts_server.py"
+FASTER_SERVER_SCRIPT = ROOT / "tts_server_faster.py"
 OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 
 
@@ -151,12 +153,15 @@ def profile_required_mem(profile: Any, text_chars: int, override_gb: float | Non
     return min(base, required)
 
 
-class LegacyFallback:
-    def __init__(self, port: int, tmpdir: Path) -> None:
+class TempServer:
+    def __init__(self, *, port: int, tmpdir: Path, script: Path, profile: str, name: str) -> None:
         self.port = port
         self.tmpdir = tmpdir
+        self.script = script
+        self.profile = profile
+        self.name = name
         self.process: subprocess.Popen[str] | None = None
-        self.log_path = tmpdir / f"tts_legacy_fallback_{os.getpid()}.log"
+        self.log_path = tmpdir / f"tts_{name}_{os.getpid()}.log"
         self.url = f"http://127.0.0.1:{port}"
 
     def _port_pid(self) -> int | None:
@@ -185,9 +190,10 @@ class LegacyFallback:
             cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore").replace("\x00", " ")
         except Exception:
             cmdline = ""
-        if "tts_server.py" not in cmdline:
-            raise OrchestrationError(f"Legacy fallback port {self.port} already in use by unexpected process: {cmdline or f'pid={pid}'}")
-        log(f"Cleaning up stale legacy fallback on port {self.port} (pid={pid})")
+        expected = self.script.name
+        if expected not in cmdline:
+            raise OrchestrationError(f"Temporary {self.name} port {self.port} already in use by unexpected process: {cmdline or f'pid={pid}'}")
+        log(f"Cleaning up stale temporary {self.name} server on port {self.port} (pid={pid})")
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.kill(pid, sig)
@@ -199,19 +205,23 @@ class LegacyFallback:
             except ProcessLookupError:
                 return
 
-    def start(self, wait_seconds: int = 360) -> None:
+    def start(self, wait_seconds: int = 360, stop_primary: bool = False, free_ram: bool = False) -> None:
         if self.process and self.process.poll() is None:
             return
         self.ensure_port_free()
-        log(f"Starting temporary legacy fallback on port {self.port}")
-        subprocess.run(["sudo", "systemctl", "stop", "qwen3-tts"], check=False)
-        subprocess.run(["sync"], check=False)
-        subprocess.run(["sudo", "tee", "/proc/sys/vm/drop_caches"], input="3\n", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        log(f"Starting temporary {self.name} server on port {self.port}")
+        if stop_primary:
+            subprocess.run(["sudo", "systemctl", "stop", "qwen3-tts"], check=False)
+        if free_ram:
+            log("Stopping Whisper/Ollama and dropping caches to free shared RAM")
+            subprocess.run(["sudo", "systemctl", "stop", "whisper-server", "ollama"], check=False)
+            subprocess.run(["sync"], check=False)
+            subprocess.run(["sudo", "tee", "/proc/sys/vm/drop_caches"], input="3\n", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         with self.log_path.open("w", encoding="utf-8") as log_file:
             self.process = subprocess.Popen(
-                ["/usr/bin/python3", str(LEGACY_SERVER_SCRIPT)],
+                ["/usr/bin/python3", str(self.script)],
                 cwd=str(ROOT),
-                env={**os.environ, "QWEN3_TTS_PROFILE": "fallback", "PORT": str(self.port)},
+                env={**os.environ, "QWEN3_TTS_PROFILE": self.profile, "PORT": str(self.port)},
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -223,14 +233,14 @@ class LegacyFallback:
         while time.time() < deadline:
             if self.process and self.process.poll() is not None:
                 tail = self.log_path.read_text(encoding="utf-8", errors="ignore")[-2000:] if self.log_path.exists() else ""
-                raise OrchestrationError(f"Legacy fallback exited early with rc={self.process.returncode}:\n{tail}")
+                raise OrchestrationError(f"Temporary {self.name} server exited early with rc={self.process.returncode}:\n{tail}")
             snap = snapshot_service(self.url)
             if snap.status == "ok":
-                log("Legacy fallback ready")
+                log(f"Temporary {self.name} server ready")
                 return
             time.sleep(5)
         tail = self.log_path.read_text(encoding="utf-8", errors="ignore")[-2000:] if self.log_path.exists() else ""
-        raise OrchestrationError(f"Legacy fallback not ready after {wait_seconds}s\n{tail}")
+        raise OrchestrationError(f"Temporary {self.name} server not ready after {wait_seconds}s\n{tail}")
 
     def stop(self) -> None:
         if not self.process:
@@ -249,12 +259,17 @@ class Orchestrator:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.text_chars = len(args.text)
-        self.bot_token = read_bot_token(args.bot_token)
+        self.bot_token = getattr(args, "bot_token", None)
         self.primary_url = args.server.rstrip("/")
-        self.legacy = LegacyFallback(args.legacy_port, Path(args.tmpdir))
+        small_port = getattr(args, "small_port", DEFAULT_SMALL_PORT)
+        legacy_port = getattr(args, "legacy_port", DEFAULT_LEGACY_PORT)
+        tmpdir = Path(args.tmpdir)
+        self.small = TempServer(port=small_port, tmpdir=tmpdir, script=FASTER_SERVER_SCRIPT, profile="small", name="faster-small")
+        self.legacy = TempServer(port=legacy_port, tmpdir=tmpdir, script=LEGACY_SERVER_SCRIPT, profile="fallback", name="legacy-fallback")
         self.restore_primary = False
         self.primary_profile: dict[str, Any] = {}
         self.primary_engine = ""
+        self.route_warning: str | None = None
         self.tmpdir_obj: tempfile.TemporaryDirectory[str] | None = None
         self.temp_dir_path: Path | None = None
         self.wav_path: Path | None = None
@@ -287,28 +302,53 @@ class Orchestrator:
             time.sleep(5)
         raise OrchestrationError(f"Primary TTS not ready after {wait_seconds}s")
 
+    def set_route_warning(self, message: str) -> None:
+        self.route_warning = message.strip()
+        log(f"WARNING: {self.route_warning}")
+
+    def should_free_ram_for_text(self) -> bool:
+        enabled = getattr(self.args, "free_ram_on_longtext", True)
+        min_chars = getattr(self.args, "free_ram_min_chars", 900)
+        return bool(enabled and self.text_chars >= min_chars)
+
+    def start_small(self, reason: str, free_ram: bool = False) -> str:
+        self.set_route_warning(reason)
+        if not self.args.dry_run:
+            self.small.start(stop_primary=True, free_ram=free_ram)
+            self.restore_primary = True
+        return self.small.url
+
+    def start_legacy(self, reason: str, free_ram: bool = False) -> str:
+        self.set_route_warning(reason)
+        if not self.args.dry_run:
+            self.legacy.start(stop_primary=True, free_ram=free_ram)
+            self.restore_primary = True
+        return self.legacy.url
+
     def choose_route(self) -> str:
         snap = snapshot_service(self.primary_url)
         self.primary_profile = snap.profile if isinstance(snap.profile, dict) else {}
         self.primary_engine = snap.engine
         startup_error = snap.startup_error.lower()
+        free_ram = self.should_free_ram_for_text()
+
         if snap.status != "ok":
             current_mem = host_mem_available_gb()
             if "insufficient memavailable" in startup_error:
-                log("Primary faster service reports clear memory shortage -> route directly to legacy")
-                if not self.args.dry_run:
-                    self.legacy.start()
-                    self.restore_primary = True
-                return self.legacy.url
+                log("Primary faster service reports clear memory shortage")
+                return self.start_legacy(
+                    "⚠️ Fallback aktiv: legacy statt faster (Start wegen zu wenig RAM nicht tragfähig).",
+                    free_ram=free_ram,
+                )
             if current_mem < self.restore_target_mem_gb():
                 log(
                     "Primary faster service unavailable and host RAM still below restore target "
-                    f"({current_mem:.2f}GB < {self.restore_target_mem_gb():.2f}GB) -> route directly to legacy"
+                    f"({current_mem:.2f}GB < {self.restore_target_mem_gb():.2f}GB)"
                 )
-                if not self.args.dry_run:
-                    self.legacy.start()
-                    self.restore_primary = True
-                return self.legacy.url
+                return self.start_legacy(
+                    "⚠️ Fallback aktiv: legacy statt faster (Host-RAM unter Restore-Ziel).",
+                    free_ram=free_ram,
+                )
             log("Primary service unhealthy -> restart once and retry")
             if self.args.dry_run:
                 return self.primary_url
@@ -322,11 +362,16 @@ class Orchestrator:
         if snap.engine.startswith("faster-qwen3-tts:"):
             required = profile_required_mem(snap.profile, self.text_chars, self.args.longtext_mem_gb)
             if snap.mem_available_gb < required:
-                log(f"MemAvailable {snap.mem_available_gb:.2f}GB < required {required:.2f}GB -> route to legacy fallback")
-                if not self.args.dry_run:
-                    self.legacy.start()
-                    self.restore_primary = True
-                return self.legacy.url
+                log(f"MemAvailable {snap.mem_available_gb:.2f}GB < required {required:.2f}GB for large")
+                if snap.mem_available_gb >= getattr(self.args, "small_min_mem_gb", 1.4):
+                    return self.start_small(
+                        f"⚠️ Downgrade aktiv: faster-small statt faster-large (RAM {snap.mem_available_gb:.2f}GB < large benötigt {required:.2f}GB).",
+                        free_ram=free_ram,
+                    )
+                return self.start_legacy(
+                    f"⚠️ Fallback aktiv: legacy statt faster (RAM {snap.mem_available_gb:.2f}GB < benötigt {required:.2f}GB).",
+                    free_ram=free_ram,
+                )
         return self.primary_url
 
     def synthesize(self, server_url: str) -> None:
@@ -343,10 +388,18 @@ class Orchestrator:
             if server_url == self.primary_url:
                 snap = snapshot_service(self.primary_url)
                 if snap.engine.startswith("faster-qwen3-tts:"):
-                    log("Primary faster request failed -> trying legacy fallback once")
-                    self.legacy.start()
-                    self.restore_primary = True
-                    wav_bytes, headers, _ = post_json_bytes(self.legacy.url + "/tts", payload, timeout=self.args.max_time)
+                    log("Primary faster request failed -> trying adaptive fallback")
+                    current_mem = host_mem_available_gb()
+                    if current_mem >= getattr(self.args, "small_min_mem_gb", 1.4):
+                        self.small.start(stop_primary=True, free_ram=self.should_free_ram_for_text())
+                        self.restore_primary = True
+                        self.set_route_warning("⚠️ Downgrade aktiv: faster-small statt faster-large (Request auf large fehlgeschlagen).")
+                        wav_bytes, headers, _ = post_json_bytes(self.small.url + "/tts", payload, timeout=self.args.max_time)
+                    else:
+                        self.legacy.start(stop_primary=True, free_ram=self.should_free_ram_for_text())
+                        self.restore_primary = True
+                        self.set_route_warning("⚠️ Fallback aktiv: faster-Request fehlgeschlagen, nutze legacy als Rettungsweg.")
+                        wav_bytes, headers, _ = post_json_bytes(self.legacy.url + "/tts", payload, timeout=self.args.max_time)
                 else:
                     raise
             else:
@@ -365,16 +418,28 @@ class Orchestrator:
         )
         log(f"OGG generated: {self.ogg_path} ({self.ogg_path.stat().st_size} bytes)")
 
+    def build_caption(self) -> str | None:
+        parts: list[str] = []
+        if self.args.caption:
+            parts.append(self.args.caption.strip())
+        if self.route_warning:
+            parts.append(self.route_warning)
+        caption = "\n".join(part for part in parts if part).strip()
+        return caption or None
+
     def send_voice(self) -> int:
         assert self.ogg_path
+        if not self.bot_token:
+            self.bot_token = read_bot_token(self.args.bot_token)
         log(f"Sending voice to Telegram (chat_id={self.args.chat_id})")
         form = [
             ("chat_id", str(self.args.chat_id)),
         ]
         if self.args.reply_to:
             form.append(("reply_to_message_id", str(self.args.reply_to)))
-        if self.args.caption:
-            form.append(("caption", self.args.caption))
+        caption = self.build_caption()
+        if caption:
+            form.append(("caption", caption))
         boundary = f"----OpenClawBoundary{int(time.time() * 1000)}"
         body = bytearray()
         for key, value in form:
@@ -434,6 +499,7 @@ class Orchestrator:
         return False
 
     def restore(self) -> None:
+        self.small.stop()
         self.legacy.stop()
         if self.restore_primary:
             if not self.wait_for_restore_window():
@@ -482,11 +548,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server", default=DEFAULT_SERVER)
     parser.add_argument("--max-time", type=int, default=DEFAULT_MAX_TIME)
     parser.add_argument("--legacy-port", type=int, default=DEFAULT_LEGACY_PORT)
+    parser.add_argument("--small-port", type=int, default=DEFAULT_SMALL_PORT)
     parser.add_argument("--tmpdir", default=str(DEFAULT_TMPDIR))
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Resolve routing and planned actions, but do not synthesize or send")
     parser.add_argument("--bot-token")
     parser.add_argument("--longtext-mem-gb", type=float, default=(float(os.environ["TTS_LONGTEXT_MEM_GB"]) if os.environ.get("TTS_LONGTEXT_MEM_GB") else None))
+    parser.add_argument("--small-min-mem-gb", type=float, default=float(os.environ.get("TTS_SMALL_MIN_MEM_GB", "1.4")))
+    parser.add_argument("--free-ram-on-longtext", action="store_true", default=os.environ.get("TTS_FREE_RAM_ON_LONGTEXT", "1") not in {"0", "false", "False"})
+    parser.add_argument("--free-ram-min-chars", type=int, default=int(os.environ.get("TTS_FREE_RAM_MIN_CHARS", "900")))
     parser.add_argument("--restore-wait-seconds", type=int, default=DEFAULT_RESTORE_WAIT_SECONDS)
     parser.add_argument("--restore-poll-seconds", type=int, default=DEFAULT_RESTORE_POLL_SECONDS)
     parser.add_argument("--restore-stable-samples", type=int, default=DEFAULT_RESTORE_STABLE_SAMPLES)

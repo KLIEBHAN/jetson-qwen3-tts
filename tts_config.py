@@ -41,6 +41,7 @@ class ServerProfile:
     warmup_mode: str = "minimal"
     warmup_max_new_tokens: int = 256
     startup_mem_headroom_gb: float = 0.5
+    startup_soft_gap_gb: float = 0.0
     routing: RoutingThresholds | None = None
 
     def to_dict(self) -> Dict[str, object]:
@@ -59,15 +60,16 @@ FASTER_PROFILES: Dict[str, ServerProfile] = {
         max_seq_len=3584,
         min_mem_available_gb=3.0,
         warmup_mode="minimal",
-        warmup_max_new_tokens=192,
-        startup_mem_headroom_gb=0.6,
+        warmup_max_new_tokens=128,
+        startup_mem_headroom_gb=0.4,
+        startup_soft_gap_gb=0.2,
         routing=RoutingThresholds(
             short_chars=400,
             medium_chars=1200,
             long_chars=2200,
-            short_mem_gb=1.6,
-            medium_mem_gb=2.2,
-            long_mem_gb=2.8,
+            short_mem_gb=2.6,
+            medium_mem_gb=2.8,
+            long_mem_gb=3.0,
             xlong_mem_gb=3.0,
         ),
     ),
@@ -79,8 +81,9 @@ FASTER_PROFILES: Dict[str, ServerProfile] = {
         max_seq_len=2048,
         min_mem_available_gb=2.0,
         warmup_mode="minimal",
-        warmup_max_new_tokens=128,
-        startup_mem_headroom_gb=0.4,
+        warmup_max_new_tokens=96,
+        startup_mem_headroom_gb=0.3,
+        startup_soft_gap_gb=0.15,
         routing=RoutingThresholds(
             short_chars=400,
             medium_chars=1000,
@@ -184,6 +187,9 @@ def get_faster_profile() -> ServerProfile:
             ),
             "startup_mem_headroom_gb": env_float(
                 "QWEN3_TTS_STARTUP_HEADROOM_GB", profile.startup_mem_headroom_gb
+            ),
+            "startup_soft_gap_gb": env_float(
+                "QWEN3_TTS_STARTUP_SOFT_GAP_GB", profile.startup_soft_gap_gb
             ),
             "routing": build_routing_thresholds(profile.routing),
         }

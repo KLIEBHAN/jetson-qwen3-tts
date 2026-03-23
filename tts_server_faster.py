@@ -13,6 +13,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import gc
 import io
+import threading
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -35,6 +36,11 @@ STARTUP_ERROR = None
 STARTED_AT = time.time()
 WARMUP_STATE = "pending"
 LAST_WARMUP_AT = None
+LAST_REQUEST_AT = None
+LAST_SUCCESS_AT = None
+LAST_ERROR = None
+STARTUP_RELAXED = False
+INFER_LOCK = threading.Lock()
 
 
 def meminfo():
@@ -68,9 +74,14 @@ def runtime_snapshot():
         "profile": PROFILE.name,
         "engine": APP_ENGINE,
         "startup_error": STARTUP_ERROR,
+        "startup_relaxed": STARTUP_RELAXED,
         "uptime_s": round(time.time() - STARTED_AT, 1),
         "warmup_state": WARMUP_STATE,
         "last_warmup_at": LAST_WARMUP_AT,
+        "last_request_at": LAST_REQUEST_AT,
+        "last_success_at": LAST_SUCCESS_AT,
+        "last_error": LAST_ERROR,
+        "busy": INFER_LOCK.locked(),
     }
 
 
@@ -89,6 +100,15 @@ def preflight_can_run(text_chars: int | None = None, extra_headroom_gb: float = 
 
 
 
+def warmup_required_mem_gb() -> float:
+    base = get_required_mem_available_gb(PROFILE, text_chars=len(PROFILE.warmup_text))
+    routing = getattr(PROFILE, "routing", None)
+    if routing is not None:
+        base = max(base, float(routing.medium_mem_gb))
+    return round(base + PROFILE.startup_mem_headroom_gb, 2)
+
+
+
 def maybe_warmup(reason: str):
     global WARMUP_STATE, LAST_WARMUP_AT
 
@@ -102,10 +122,9 @@ def maybe_warmup(reason: str):
     if WARMUP_STATE == "complete":
         return False
 
-    ok, mem, required = preflight_can_run(
-        text_chars=len(PROFILE.warmup_text),
-        extra_headroom_gb=PROFILE.startup_mem_headroom_gb,
-    )
+    mem = system_memory_snapshot()
+    required = warmup_required_mem_gb()
+    ok = mem["mem_available_gb"] >= required
     if not ok:
         WARMUP_STATE = "deferred"
         print(
@@ -143,7 +162,7 @@ def maybe_warmup(reason: str):
 
 
 def load_model():
-    global model, VALID_SPEAKERS, STARTUP_ERROR
+    global model, VALID_SPEAKERS, STARTUP_ERROR, STARTUP_RELAXED, WARMUP_STATE
     print(f"Loading FasterQwen3TTS model with profile={PROFILE.name}...")
     print(
         "Profile config: "
@@ -152,14 +171,24 @@ def load_model():
         f"min_mem_available_gb={PROFILE.min_mem_available_gb}, "
         f"warmup_mode={PROFILE.warmup_mode}, "
         f"warmup_max_new_tokens={PROFILE.warmup_max_new_tokens}, "
-        f"startup_mem_headroom_gb={PROFILE.startup_mem_headroom_gb}"
+        f"startup_mem_headroom_gb={PROFILE.startup_mem_headroom_gb}, "
+        f"startup_soft_gap_gb={PROFILE.startup_soft_gap_gb}"
     )
 
     ok, mem, required = preflight_can_run(extra_headroom_gb=PROFILE.startup_mem_headroom_gb)
     if not ok:
-        raise RuntimeError(
-            f"Insufficient MemAvailable for faster profile '{PROFILE.name}': {mem['mem_available_gb']:.2f} GB < {required:.2f} GB"
-        )
+        deficit = round(required - mem['mem_available_gb'], 2)
+        if deficit <= PROFILE.startup_soft_gap_gb:
+            STARTUP_RELAXED = True
+            WARMUP_STATE = "deferred"
+            print(
+                f"Relaxed startup enabled: MemAvailable={mem['mem_available_gb']:.2f} GB, "
+                f"required={required:.2f} GB, deficit={deficit:.2f} GB <= soft_gap={PROFILE.startup_soft_gap_gb:.2f} GB"
+            )
+        else:
+            raise RuntimeError(
+                f"Insufficient MemAvailable for faster profile '{PROFILE.name}': {mem['mem_available_gb']:.2f} GB < {required:.2f} GB"
+            )
 
     from faster_qwen3_tts import FasterQwen3TTS
 
@@ -177,7 +206,10 @@ def load_model():
     )
     print(f"Speakers: {', '.join(sorted(VALID_SPEAKERS))}")
 
-    maybe_warmup("startup")
+    if not STARTUP_RELAXED:
+        maybe_warmup("startup")
+    else:
+        print("Startup warmup skipped because relaxed startup was used")
     ready = runtime_snapshot()
     print(
         f"Ready! GPU={ready['gpu_memory_gb']:.2f} GB reserved={ready['gpu_reserved_gb']:.2f} GB | MemAvailable={ready['mem_available_gb']:.2f} GB | warmup={ready['warmup_state']}"
@@ -187,6 +219,7 @@ def load_model():
 
 @app.route("/tts", methods=["POST"])
 def tts():
+    global LAST_REQUEST_AT, LAST_SUCCESS_AT, LAST_ERROR
     data = request.json or {}
     text = data.get("text", "Hallo.")
     speaker = data.get("speaker", PROFILE.warmup_speaker)
@@ -201,54 +234,62 @@ def tts():
         return jsonify({"error": f"Invalid speaker: {speaker}", "valid_speakers": sorted(VALID_SPEAKERS)}), 400
     if not text or not text.strip():
         return jsonify({"error": "Empty text"}), 400
+    if INFER_LOCK.locked():
+        return jsonify({"error": "TTS busy", "hint": "Retry shortly or route via queue.", **runtime_snapshot()}), 429
 
-    maybe_warmup("first_request")
-    ok, mem, required = preflight_can_run(text_chars=text_chars)
-    if not ok:
-        return jsonify({
-            "error": "Insufficient MemAvailable for faster inference",
-            "hint": "Route this request to the legacy fallback and retry faster later.",
-            "required_mem_available_gb": required,
-            "text_chars": text_chars,
-            **runtime_snapshot(),
-        }), 503
+    with INFER_LOCK:
+        LAST_REQUEST_AT = round(time.time() - STARTED_AT, 1)
+        maybe_warmup("first_request")
+        ok, mem, required = preflight_can_run(text_chars=text_chars)
+        if not ok:
+            LAST_ERROR = f"preflight:{mem['mem_available_gb']:.2f}<{required:.2f}"
+            return jsonify({
+                "error": "Insufficient MemAvailable for faster inference",
+                "hint": "Route this request to the legacy fallback and retry faster later.",
+                "required_mem_available_gb": required,
+                "text_chars": text_chars,
+                **runtime_snapshot(),
+            }), 503
 
-    try:
-        start = time.time()
-        wavs, sr = model.generate_custom_voice(
-            text=text,
-            speaker=speaker,
-            language=language,
-            max_new_tokens=max_tokens,
-        )
-        elapsed = time.time() - start
+        try:
+            start = time.time()
+            wavs, sr = model.generate_custom_voice(
+                text=text,
+                speaker=speaker,
+                language=language,
+                max_new_tokens=max_tokens,
+            )
+            elapsed = time.time() - start
 
-        buf = io.BytesIO()
-        sf.write(buf, wavs[0], sr, format="WAV")
-        buf.seek(0)
+            buf = io.BytesIO()
+            sf.write(buf, wavs[0], sr, format="WAV")
+            buf.seek(0)
 
-        duration = len(wavs[0]) / sr
-        rtf = elapsed / duration if duration else 0.0
-        snapshot = runtime_snapshot()
-        print(
-            f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | text={text_chars} chars | max_new_tokens={max_tokens} | GPU={snapshot['gpu_memory_gb']:.2f}GB reserved={snapshot['gpu_reserved_gb']:.2f}GB | MemAvailable={snapshot['mem_available_gb']:.2f}GB"
-        )
+            duration = len(wavs[0]) / sr
+            rtf = elapsed / duration if duration else 0.0
+            LAST_SUCCESS_AT = round(time.time() - STARTED_AT, 1)
+            LAST_ERROR = None
+            snapshot = runtime_snapshot()
+            print(
+                f"TTS: {duration:.1f}s audio in {elapsed:.1f}s (RTF={rtf:.2f}) | text={text_chars} chars | max_new_tokens={max_tokens} | GPU={snapshot['gpu_memory_gb']:.2f}GB reserved={snapshot['gpu_reserved_gb']:.2f}GB | MemAvailable={snapshot['mem_available_gb']:.2f}GB"
+            )
 
-        vram_cleanup()
-        response = send_file(buf, mimetype="audio/wav")
-        response.headers["X-Audio-Duration"] = f"{duration:.1f}"
-        response.headers["X-Processing-Time"] = f"{elapsed:.1f}"
-        response.headers["X-RTF"] = f"{rtf:.2f}"
-        response.headers["X-Torch-Allocated-GB"] = f"{snapshot['gpu_memory_gb']:.2f}"
-        response.headers["X-Torch-Reserved-GB"] = f"{snapshot['gpu_reserved_gb']:.2f}"
-        response.headers["X-MemAvailable-GB"] = f"{snapshot['mem_available_gb']:.2f}"
-        response.headers["X-Profile"] = PROFILE.name
-        response.headers["X-Warmup-State"] = snapshot["warmup_state"]
-        return response
-    except Exception as e:
-        vram_cleanup()
-        print(f"TTS ERROR: {e} | text={text_chars} chars")
-        return jsonify({"error": str(e), **runtime_snapshot()}), 500
+            vram_cleanup()
+            response = send_file(buf, mimetype="audio/wav")
+            response.headers["X-Audio-Duration"] = f"{duration:.1f}"
+            response.headers["X-Processing-Time"] = f"{elapsed:.1f}"
+            response.headers["X-RTF"] = f"{rtf:.2f}"
+            response.headers["X-Torch-Allocated-GB"] = f"{snapshot['gpu_memory_gb']:.2f}"
+            response.headers["X-Torch-Reserved-GB"] = f"{snapshot['gpu_reserved_gb']:.2f}"
+            response.headers["X-MemAvailable-GB"] = f"{snapshot['mem_available_gb']:.2f}"
+            response.headers["X-Profile"] = PROFILE.name
+            response.headers["X-Warmup-State"] = snapshot["warmup_state"]
+            return response
+        except Exception as e:
+            LAST_ERROR = str(e)
+            vram_cleanup()
+            print(f"TTS ERROR: {e} | text={text_chars} chars")
+            return jsonify({"error": str(e), **runtime_snapshot()}), 500
 
 
 @app.route("/speakers", methods=["GET"])
