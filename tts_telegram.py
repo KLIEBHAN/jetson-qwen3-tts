@@ -26,6 +26,7 @@ DEFAULT_SERVER = os.environ.get("TTS_SERVER", "http://127.0.0.1:5050").rstrip("/
 DEFAULT_MAX_TIME = int(os.environ.get("TTS_MAX_TIME", "1800"))
 DEFAULT_LEGACY_PORT = int(os.environ.get("TTS_LEGACY_PORT", "5052"))
 DEFAULT_SMALL_PORT = int(os.environ.get("TTS_SMALL_PORT", "5053"))
+DEFAULT_SMALL_SERVICE = os.environ.get("TTS_SMALL_SERVICE", "qwen3-tts-small")
 DEFAULT_TMPDIR = Path(os.environ.get("TMPDIR", "/tmp"))
 ROOT = Path(__file__).resolve().parent
 LEGACY_SERVER_SCRIPT = ROOT / "tts_server.py"
@@ -191,7 +192,7 @@ class TempServer:
         except Exception:
             cmdline = ""
         expected = self.script.name
-        if expected not in cmdline:
+        if expected not in cmdline and "tts_server.py" not in cmdline and "tts_server_faster.py" not in cmdline:
             raise OrchestrationError(f"Temporary {self.name} port {self.port} already in use by unexpected process: {cmdline or f'pid={pid}'}")
         log(f"Cleaning up stale temporary {self.name} server on port {self.port} (pid={pid})")
         for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -270,6 +271,7 @@ class Orchestrator:
         self.primary_profile: dict[str, Any] = {}
         self.primary_engine = ""
         self.route_warning: str | None = None
+        self.paused_services: list[str] = []
         self.tmpdir_obj: tempfile.TemporaryDirectory[str] | None = None
         self.temp_dir_path: Path | None = None
         self.wav_path: Path | None = None
@@ -284,12 +286,21 @@ class Orchestrator:
         base = self.temp_dir_path
         return base / "output.wav", base / "output.ogg"
 
+    def maybe_pause_services_for_ram(self, free_ram: bool) -> None:
+        if not free_ram:
+            return
+        log("Stopping Whisper/Ollama to free shared RAM")
+        for svc in ("whisper-server", "ollama"):
+            state = subprocess.run(["systemctl", "is-active", svc], check=False, capture_output=True, text=True)
+            if state.returncode == 0 and state.stdout.strip() == "active":
+                self.paused_services.append(svc)
+        subprocess.run(["sudo", "systemctl", "stop", "whisper-server", "ollama"], check=False)
+        subprocess.run(["sync"], check=False)
+        subprocess.run(["sudo", "tee", "/proc/sys/vm/drop_caches"], input="3\n", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
     def restart_primary(self, aggressive: bool = False) -> None:
         if aggressive:
-            log("Stopping Whisper/Ollama to free shared RAM")
-            subprocess.run(["sudo", "systemctl", "stop", "whisper-server", "ollama"], check=False)
-            subprocess.run(["sync"], check=False)
-            subprocess.run(["sudo", "tee", "/proc/sys/vm/drop_caches"], input="3\n", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            self.maybe_pause_services_for_ram(True)
         log("Restarting qwen3-tts")
         subprocess.run(["sudo", "systemctl", "restart", "qwen3-tts"], check=False)
 
@@ -314,14 +325,21 @@ class Orchestrator:
     def start_small(self, reason: str, free_ram: bool = False) -> str:
         self.set_route_warning(reason)
         if not self.args.dry_run:
-            self.small.start(stop_primary=True, free_ram=free_ram)
+            self.maybe_pause_services_for_ram(free_ram)
+            subprocess.run(["sudo", "systemctl", "stop", "qwen3-tts"], check=False)
+            started = subprocess.run(["sudo", "systemctl", "start", DEFAULT_SMALL_SERVICE], check=False)
+            if started.returncode == 0:
+                self.restore_primary = True
+                return self.small.url
+            self.small.start(stop_primary=False, free_ram=False)
             self.restore_primary = True
         return self.small.url
 
     def start_legacy(self, reason: str, free_ram: bool = False) -> str:
         self.set_route_warning(reason)
         if not self.args.dry_run:
-            self.legacy.start(stop_primary=True, free_ram=free_ram)
+            self.maybe_pause_services_for_ram(free_ram)
+            self.legacy.start(stop_primary=True, free_ram=False)
             self.restore_primary = True
         return self.legacy.url
 
@@ -334,10 +352,10 @@ class Orchestrator:
 
         if snap.status != "ok":
             current_mem = host_mem_available_gb()
-            if "insufficient memavailable" in startup_error:
-                log("Primary faster service reports clear memory shortage")
+            if startup_error:
+                log(f"Primary startup error detected: {startup_error}")
                 return self.start_legacy(
-                    "⚠️ Fallback aktiv: legacy statt faster (Start wegen zu wenig RAM nicht tragfähig).",
+                    "⚠️ Fallback aktiv: legacy statt faster (Primary meldet Startup-Fehler).",
                     free_ram=free_ram,
                 )
             if current_mem < self.restore_target_mem_gb():
@@ -349,11 +367,11 @@ class Orchestrator:
                     "⚠️ Fallback aktiv: legacy statt faster (Host-RAM unter Restore-Ziel).",
                     free_ram=free_ram,
                 )
-            log("Primary service unhealthy -> restart once and retry")
-            if self.args.dry_run:
-                return self.primary_url
-            self.restart_primary(aggressive=False)
-            snap = self.wait_primary()
+            log("Primary service unhealthy -> conservative fallback to legacy")
+            return self.start_legacy(
+                "⚠️ Fallback aktiv: legacy statt faster (Primary aktuell unhealthy).",
+                free_ram=free_ram,
+            )
 
         log(
             "Primary service: "
@@ -391,14 +409,10 @@ class Orchestrator:
                     log("Primary faster request failed -> trying adaptive fallback")
                     current_mem = host_mem_available_gb()
                     if current_mem >= getattr(self.args, "small_min_mem_gb", 1.4):
-                        self.small.start(stop_primary=True, free_ram=self.should_free_ram_for_text())
-                        self.restore_primary = True
-                        self.set_route_warning("⚠️ Downgrade aktiv: faster-small statt faster-large (Request auf large fehlgeschlagen).")
+                        self.start_small("⚠️ Downgrade aktiv: faster-small statt faster-large (Request auf large fehlgeschlagen).", free_ram=self.should_free_ram_for_text())
                         wav_bytes, headers, _ = post_json_bytes(self.small.url + "/tts", payload, timeout=self.args.max_time)
                     else:
-                        self.legacy.start(stop_primary=True, free_ram=self.should_free_ram_for_text())
-                        self.restore_primary = True
-                        self.set_route_warning("⚠️ Fallback aktiv: faster-Request fehlgeschlagen, nutze legacy als Rettungsweg.")
+                        self.start_legacy("⚠️ Fallback aktiv: faster-Request fehlgeschlagen, nutze legacy als Rettungsweg.", free_ram=self.should_free_ram_for_text())
                         wav_bytes, headers, _ = post_json_bytes(self.legacy.url + "/tts", payload, timeout=self.args.max_time)
                 else:
                     raise
@@ -498,18 +512,27 @@ class Orchestrator:
         )
         return False
 
+    def restore_paused_services(self) -> None:
+        if not self.paused_services:
+            return
+        services = list(dict.fromkeys(self.paused_services))
+        self.paused_services = []
+        log(f"Restoring paused services: {' '.join(services)}")
+        subprocess.run(["sudo", "systemctl", "start", *services], check=False)
+
     def restore(self) -> None:
         self.small.stop()
+        subprocess.run(["sudo", "systemctl", "stop", DEFAULT_SMALL_SERVICE], check=False)
         self.legacy.stop()
         if self.restore_primary:
-            if not self.wait_for_restore_window():
-                return
-            log("Restoring faster primary service")
-            subprocess.run(["sudo", "systemctl", "start", "qwen3-tts"], check=False)
-            try:
-                self.wait_primary(wait_seconds=self.args.restore_wait_seconds)
-            except Exception as exc:
-                log(f"Primary restore stayed degraded: {exc}")
+            if self.wait_for_restore_window():
+                log("Restoring faster primary service")
+                subprocess.run(["sudo", "systemctl", "start", "qwen3-tts"], check=False)
+                try:
+                    self.wait_primary(wait_seconds=self.args.restore_wait_seconds)
+                except Exception as exc:
+                    log(f"Primary restore stayed degraded: {exc}")
+        self.restore_paused_services()
 
     def cleanup(self) -> None:
         if self.args.keep:

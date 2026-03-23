@@ -36,6 +36,10 @@ VERSION = "legacy-0.3.0"
 APP_ENGINE = f"qwen-tts-legacy:{PROFILE.name}"
 WARMUP_STATE = "pending"
 LAST_WARMUP_AT = None
+LAST_REQUEST_AT = None
+LAST_SUCCESS_AT = None
+LAST_ERROR = None
+INFER_LOCK = threading.Lock()
 
 
 def meminfo():

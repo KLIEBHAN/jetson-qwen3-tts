@@ -109,15 +109,18 @@ sudo ./install-service.sh
 # Standard: faster-large
 sudo ./install-service.sh
 
-# Optional: anderes faster-Profil
+# Optional: anderes faster-Profil (gleicher Service)
 sudo ./install-service.sh --profile small
+
+# Eigenen persistenten Small-Service auf Port 5053 anlegen
+sudo ./install-service.sh --service-name qwen3-tts-small --profile small --port 5053
 
 # Legacy explizit installieren
 sudo ./install-service.sh --legacy
 
 # Langtext-sparsam, aber ohne Chunking als Standard
 sudo ./install-service.sh --max-seq-len 3584 --max-new-tokens 4096 --min-mem-gb 3.0 \
-  --warmup-mode minimal --warmup-max-new-tokens 192 --startup-headroom-gb 0.6
+  --warmup-mode minimal --warmup-max-new-tokens 128 --startup-headroom-gb 0.4 --startup-soft-gap-gb 0.2
 ```
 
 ## Direkt starten
@@ -233,6 +236,7 @@ Neues Routing:
 - behandelt unhealthy/degraded primary konservativ und geht direkt auf `legacy`, statt blind `small` zu erzwingen
 - vermeidet Restart-Stürme, wenn `startup_error` bereits auf `Insufficient MemAvailable` zeigt
 - kann optional vor Langtext RAM freimachen (Whisper/Ollama stoppen, Cache-Drop als Notfallmaßnahme)
+- merkt sich pausierte Dienste (Whisper/Ollama) und startet sie nach dem Job wieder
 - nutzt Legacy nur temporär und stellt danach `faster-large` nur dann wieder her, wenn `MemAvailable` für den Startup-Pfad wieder stabil tragfähig ist
 - führt WAV→OGG und Telegram `sendVoice` im selben Python-Prozess aus
 
