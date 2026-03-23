@@ -230,7 +230,7 @@ Neues Routing:
 - prüft `/health` + `/info`
 - berücksichtigt Textlänge gegen die vom Server gelieferten Routing-Schwellen
 - vermeidet Restart-Stürme, wenn `startup_error` bereits auf `Insufficient MemAvailable` zeigt
-- nutzt Legacy nur temporär und stellt danach `faster-large` wieder her
+- nutzt Legacy nur temporär und stellt danach `faster-large` nur dann wieder her, wenn `MemAvailable` für den Startup-Pfad wieder stabil tragfähig ist
 - führt WAV→OGG und Telegram `sendVoice` im selben Python-Prozess aus
 
 ## Wichtige Dateien

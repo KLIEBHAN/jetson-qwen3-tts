@@ -132,8 +132,9 @@ Die eigentliche Telegram-/TTS-Orchestrierung sitzt in `~/projects/qwen3-tts/tts_
 3. wenn faster gesund **und** genug RAM für genau diesen Text vorhanden → direkt dort generieren
 4. wenn `startup_error` bereits klar auf Speichermangel zeigt → **kein unnötiger Restart**, direkt auf temporären Legacy-Fallback
 5. vor Legacy-Start einen evtl. hängengebliebenen alten Fallback-Prozess auf dem Fallback-Port gezielt aufräumen
-6. nach dem Fallback `faster-large` wiederherstellen
-7. WAV→OGG und Telegram `sendVoice` direkt im Python-Orchestrator ausführen
+6. nach dem Fallback `faster-large` nur dann wiederherstellen, wenn `MemAvailable` inkl. Startup-Headroom mehrfach stabil erreicht wird
+7. wenn das Zeitfenster dafür nicht reicht, den Restore ehrlich auslassen statt einen degradierten Sofort-Neustart zu erzwingen
+8. WAV→OGG und Telegram `sendVoice` direkt im Python-Orchestrator ausführen
 
 ### Warum Python statt Bash?
 
@@ -149,7 +150,7 @@ Mit dem kleinen Python-CLI sind diese Punkte jetzt an einem Ort gebündelt, test
 Zusätzlich gilt jetzt explizit:
 - ein allgemeiner Faster-Neustart stoppt **nicht mehr pauschal Whisper/Ollama**
 - das aggressive Freiräumen bleibt auf echte Memory-Notfälle begrenzt
-- die Wiederherstellung von `faster-large` ist **best effort**: unter weiter bestehendem Speicherdruck kann der Dienst sauber degradiert bleiben, bis wieder genug `MemAvailable` vorhanden ist
+- die Wiederherstellung von `faster-large` ist jetzt absichtlich konservativer: der Orchestrator wartet erst auf ein kleines stabiles Fenster oberhalb von `min_mem_available_gb + startup_mem_headroom_gb` (plus kleiner Hysterese), statt sofort einen degradierten Neustart zu provozieren
 
 ### Warum das besser ist
 

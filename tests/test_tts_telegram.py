@@ -47,6 +47,10 @@ class RouteTests(unittest.TestCase):
             dry_run=False,
             bot_token="dummy",
             longtext_mem_gb=None,
+            restore_wait_seconds=30,
+            restore_poll_seconds=1,
+            restore_stable_samples=2,
+            restore_hysteresis_gb=0.2,
         )
 
     @mock.patch("tts_telegram.read_bot_token", return_value="dummy")
@@ -83,6 +87,61 @@ class RouteTests(unittest.TestCase):
         restart.assert_not_called()
         legacy_start.assert_called_once()
 
+    @mock.patch("tts_telegram.read_bot_token", return_value="dummy")
+    def test_unavailable_primary_low_host_mem_routes_to_legacy(self, _token):
+        orch = tts_telegram.Orchestrator(self._args())
+        with mock.patch("tts_telegram.snapshot_service") as snap, mock.patch("tts_telegram.host_mem_available_gb", return_value=3.1), mock.patch.object(orch, "restart_primary") as restart, mock.patch.object(orch.legacy, "start") as legacy_start:
+            snap.return_value = tts_telegram.ServiceSnapshot(
+                base_url=orch.primary_url,
+                health={},
+                info={},
+            )
+            route = orch.choose_route()
+        self.assertEqual(route, orch.legacy.url)
+        restart.assert_not_called()
+        legacy_start.assert_called_once()
+
+
+class RestoreTests(unittest.TestCase):
+    def _args(self):
+        return SimpleNamespace(
+            text="Hallo Welt",
+            chat_id="123",
+            reply_to=None,
+            caption=None,
+            speaker="sohee",
+            language="german",
+            server="http://127.0.0.1:5050",
+            max_time=5,
+            legacy_port=5052,
+            tmpdir=tempfile.gettempdir(),
+            keep=False,
+            dry_run=False,
+            bot_token="dummy",
+            longtext_mem_gb=None,
+            restore_wait_seconds=30,
+            restore_poll_seconds=1,
+            restore_stable_samples=2,
+            restore_hysteresis_gb=0.2,
+        )
+
+    @mock.patch("tts_telegram.read_bot_token", return_value="dummy")
+    def test_restore_waits_for_stable_mem_window(self, _token):
+        orch = tts_telegram.Orchestrator(self._args())
+        orch.restore_primary = True
+        orch.primary_profile = {"min_mem_available_gb": 3.0, "startup_mem_headroom_gb": 0.6}
+        with mock.patch("tts_telegram.host_mem_available_gb", side_effect=[3.5, 3.9, 3.95]), mock.patch("tts_telegram.time.sleep"):
+            self.assertTrue(orch.wait_for_restore_window())
+
+    @mock.patch("tts_telegram.read_bot_token", return_value="dummy")
+    def test_restore_skips_when_mem_never_recovers(self, _token):
+        orch = tts_telegram.Orchestrator(self._args())
+        orch.restore_primary = True
+        orch.primary_profile = {"min_mem_available_gb": 3.0, "startup_mem_headroom_gb": 0.6}
+        time_values = [0, 5, 10, 15, 20, 25, 30, 30]
+        with mock.patch("tts_telegram.host_mem_available_gb", side_effect=[3.1] * len(time_values)), mock.patch("tts_telegram.time.sleep"), mock.patch("tts_telegram.time.time", side_effect=time_values):
+            self.assertFalse(orch.wait_for_restore_window())
+
 
 class CleanupTests(unittest.TestCase):
     @mock.patch("tts_telegram.read_bot_token", return_value="dummy")
@@ -102,6 +161,10 @@ class CleanupTests(unittest.TestCase):
             dry_run=True,
             bot_token="dummy",
             longtext_mem_gb=None,
+            restore_wait_seconds=30,
+            restore_poll_seconds=1,
+            restore_stable_samples=2,
+            restore_hysteresis_gb=0.2,
         )
         orch = tts_telegram.Orchestrator(args)
         wav, _ = orch._temp_paths()

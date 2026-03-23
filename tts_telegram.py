@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+DEFAULT_RESTORE_WAIT_SECONDS = int(os.environ.get("TTS_RESTORE_WAIT_SECONDS", "180"))
+DEFAULT_RESTORE_POLL_SECONDS = int(os.environ.get("TTS_RESTORE_POLL_SECONDS", "10"))
+DEFAULT_RESTORE_STABLE_SAMPLES = int(os.environ.get("TTS_RESTORE_STABLE_SAMPLES", "2"))
+DEFAULT_RESTORE_HYSTERESIS_GB = float(os.environ.get("TTS_RESTORE_HYSTERESIS_GB", "0.2"))
+
 DEFAULT_SERVER = os.environ.get("TTS_SERVER", "http://127.0.0.1:5050").rstrip("/")
 DEFAULT_MAX_TIME = int(os.environ.get("TTS_MAX_TIME", "1800"))
 DEFAULT_LEGACY_PORT = int(os.environ.get("TTS_LEGACY_PORT", "5052"))
@@ -109,6 +114,18 @@ def post_json_bytes(url: str, payload: dict[str, Any], timeout: int) -> tuple[by
 
 def snapshot_service(base_url: str) -> ServiceSnapshot:
     return ServiceSnapshot(base_url=base_url, health=fetch_json(base_url + "/health"), info=fetch_json(base_url + "/info"))
+
+
+def host_mem_available_gb() -> float:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    kb = int(line.split()[1])
+                    return kb / 1024 / 1024
+    except Exception:
+        return 0.0
+    return 0.0
 
 
 def profile_required_mem(profile: Any, text_chars: int, override_gb: float | None) -> float:
@@ -236,6 +253,8 @@ class Orchestrator:
         self.primary_url = args.server.rstrip("/")
         self.legacy = LegacyFallback(args.legacy_port, Path(args.tmpdir))
         self.restore_primary = False
+        self.primary_profile: dict[str, Any] = {}
+        self.primary_engine = ""
         self.tmpdir_obj: tempfile.TemporaryDirectory[str] | None = None
         self.temp_dir_path: Path | None = None
         self.wav_path: Path | None = None
@@ -270,10 +289,22 @@ class Orchestrator:
 
     def choose_route(self) -> str:
         snap = snapshot_service(self.primary_url)
+        self.primary_profile = snap.profile if isinstance(snap.profile, dict) else {}
+        self.primary_engine = snap.engine
         startup_error = snap.startup_error.lower()
         if snap.status != "ok":
+            current_mem = host_mem_available_gb()
             if "insufficient memavailable" in startup_error:
                 log("Primary faster service reports clear memory shortage -> route directly to legacy")
+                if not self.args.dry_run:
+                    self.legacy.start()
+                    self.restore_primary = True
+                return self.legacy.url
+            if current_mem < self.restore_target_mem_gb():
+                log(
+                    "Primary faster service unavailable and host RAM still below restore target "
+                    f"({current_mem:.2f}GB < {self.restore_target_mem_gb():.2f}GB) -> route directly to legacy"
+                )
                 if not self.args.dry_run:
                     self.legacy.start()
                     self.restore_primary = True
@@ -368,13 +399,49 @@ class Orchestrator:
         result = payload["result"]
         return int(result["message_id"])
 
+    def restore_target_mem_gb(self) -> float:
+        profile = self.primary_profile if isinstance(self.primary_profile, dict) else {}
+        base = float(profile.get("min_mem_available_gb", 3.0) or 3.0)
+        headroom = float(profile.get("startup_mem_headroom_gb", 0.6) or 0.6)
+        return base + headroom + float(self.args.restore_hysteresis_gb)
+
+    def wait_for_restore_window(self) -> bool:
+        target = self.restore_target_mem_gb()
+        deadline = time.time() + self.args.restore_wait_seconds
+        stable = 0
+        while time.time() < deadline:
+            mem = host_mem_available_gb()
+            if mem >= target:
+                stable += 1
+                log(
+                    f"Restore precheck sample {stable}/{self.args.restore_stable_samples}: "
+                    f"MemAvailable={mem:.2f}GB >= target {target:.2f}GB"
+                )
+                if stable >= self.args.restore_stable_samples:
+                    return True
+            else:
+                if stable:
+                    log(
+                        f"Restore precheck reset: MemAvailable={mem:.2f}GB < target {target:.2f}GB"
+                    )
+                stable = 0
+            time.sleep(self.args.restore_poll_seconds)
+        mem = host_mem_available_gb()
+        log(
+            f"Skip faster restore for now: MemAvailable={mem:.2f}GB < target {target:.2f}GB "
+            f"after waiting {self.args.restore_wait_seconds}s"
+        )
+        return False
+
     def restore(self) -> None:
         self.legacy.stop()
         if self.restore_primary:
+            if not self.wait_for_restore_window():
+                return
             log("Restoring faster primary service")
             subprocess.run(["sudo", "systemctl", "start", "qwen3-tts"], check=False)
             try:
-                self.wait_primary(wait_seconds=180)
+                self.wait_primary(wait_seconds=self.args.restore_wait_seconds)
             except Exception as exc:
                 log(f"Primary restore stayed degraded: {exc}")
 
@@ -420,6 +487,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Resolve routing and planned actions, but do not synthesize or send")
     parser.add_argument("--bot-token")
     parser.add_argument("--longtext-mem-gb", type=float, default=(float(os.environ["TTS_LONGTEXT_MEM_GB"]) if os.environ.get("TTS_LONGTEXT_MEM_GB") else None))
+    parser.add_argument("--restore-wait-seconds", type=int, default=DEFAULT_RESTORE_WAIT_SECONDS)
+    parser.add_argument("--restore-poll-seconds", type=int, default=DEFAULT_RESTORE_POLL_SECONDS)
+    parser.add_argument("--restore-stable-samples", type=int, default=DEFAULT_RESTORE_STABLE_SAMPLES)
+    parser.add_argument("--restore-hysteresis-gb", type=float, default=DEFAULT_RESTORE_HYSTERESIS_GB)
     return parser
 
 
