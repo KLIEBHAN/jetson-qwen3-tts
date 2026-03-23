@@ -21,6 +21,7 @@ DEFAULT_RESTORE_WAIT_SECONDS = int(os.environ.get("TTS_RESTORE_WAIT_SECONDS", "1
 DEFAULT_RESTORE_POLL_SECONDS = int(os.environ.get("TTS_RESTORE_POLL_SECONDS", "10"))
 DEFAULT_RESTORE_STABLE_SAMPLES = int(os.environ.get("TTS_RESTORE_STABLE_SAMPLES", "2"))
 DEFAULT_RESTORE_HYSTERESIS_GB = float(os.environ.get("TTS_RESTORE_HYSTERESIS_GB", "0.2"))
+DEFAULT_RESTORE_DELAY_SECONDS = int(os.environ.get("TTS_RESTORE_DELAY_SECONDS", "0"))
 
 DEFAULT_SERVER = os.environ.get("TTS_SERVER", "http://127.0.0.1:5050").rstrip("/")
 DEFAULT_MAX_TIME = int(os.environ.get("TTS_MAX_TIME", "1800"))
@@ -517,6 +518,15 @@ class Orchestrator:
             return
         services = list(dict.fromkeys(self.paused_services))
         self.paused_services = []
+        delay = int(getattr(self.args, "restore_delay_seconds", 0) or 0)
+        if delay > 0:
+            log(f"Delaying restore of paused services by {delay}s: {' '.join(services)}")
+            subprocess.run([
+                "bash",
+                "-lc",
+                f"sleep {delay}; sudo systemctl start {' '.join(services)} >/dev/null 2>&1 || true",
+            ], check=False, start_new_session=True)
+            return
         log(f"Restoring paused services: {' '.join(services)}")
         subprocess.run(["sudo", "systemctl", "start", *services], check=False)
 
@@ -584,6 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restore-poll-seconds", type=int, default=DEFAULT_RESTORE_POLL_SECONDS)
     parser.add_argument("--restore-stable-samples", type=int, default=DEFAULT_RESTORE_STABLE_SAMPLES)
     parser.add_argument("--restore-hysteresis-gb", type=float, default=DEFAULT_RESTORE_HYSTERESIS_GB)
+    parser.add_argument("--restore-delay-seconds", type=int, default=DEFAULT_RESTORE_DELAY_SECONDS)
     return parser
 
 
