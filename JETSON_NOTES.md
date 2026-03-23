@@ -122,7 +122,8 @@ Auch die Legacy-Engine hat jetzt konsistente Warmup-/Health-Felder:
 
 ## Routing / Recovery im Telegram-Wrapper
 
-`~/workspace/scripts/tts-telegram.sh` wurde weiter verfeinert.
+`~/workspace/scripts/tts-telegram.sh` ist jetzt nur noch ein dünner Einstiegspunkt.
+Die eigentliche Telegram-/TTS-Orchestrierung sitzt in `~/projects/qwen3-tts/tts_telegram.py`.
 
 ### Neues Verhalten
 
@@ -132,6 +133,18 @@ Auch die Legacy-Engine hat jetzt konsistente Warmup-/Health-Felder:
 4. wenn `startup_error` bereits klar auf Speichermangel zeigt → **kein unnötiger Restart**, direkt auf temporären Legacy-Fallback
 5. vor Legacy-Start einen evtl. hängengebliebenen alten Fallback-Prozess auf dem Fallback-Port gezielt aufräumen
 6. nach dem Fallback `faster-large` wiederherstellen
+7. WAV→OGG und Telegram `sendVoice` direkt im Python-Orchestrator ausführen
+
+### Warum Python statt Bash?
+
+Die alte Bash-Variante war funktional, aber strukturell fragil an genau den Stellen, die hier kritisch sind:
+- JSON-Felder aus `/health` und `/info`
+- Port-/PID-Erkennung für temporäre Fallback-Prozesse
+- mehrstufige Fehlerpfade mit Retry/Fallback/Restore
+- sauberes Aufräumen temporärer Dateien
+- Telegram-Multipart-Upload plus TTS-/ffmpeg-Fehlerbehandlung
+
+Mit dem kleinen Python-CLI sind diese Punkte jetzt an einem Ort gebündelt, testbar und deutlich weniger whitespace-/pipe-abhängig.
 
 Zusätzlich gilt jetzt explizit:
 - ein allgemeiner Faster-Neustart stoppt **nicht mehr pauschal Whisper/Ollama**

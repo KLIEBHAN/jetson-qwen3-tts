@@ -31,11 +31,12 @@ Telegram / lokale Clients
                - langsamer, aber robuster
 ```
 
-Zusätzlich nutzt `~/workspace/scripts/tts-telegram.sh` jetzt sauberes Routing:
+Zusätzlich nutzt `~/workspace/scripts/tts-telegram.sh` jetzt einen kleinen Python-Orchestrator (`tts_telegram.py`) für sauberes Routing:
 1. primär `faster-large`
 2. bei zu wenig `MemAvailable` oder klarem Startup-Memory-Fehler → temporärer `legacy`-Fallback
 3. danach Wiederherstellung von `faster-large`
 4. keine unnötigen Restart-Loops bei bereits erkennbarem Speichermangel
+5. WAV→OGG und Telegram-Upload laufen ebenfalls in Python mit klaren Fehlerpfaden
 
 ## Profile statt Datei-Duplikate
 
@@ -222,11 +223,15 @@ Messbare Ergebnisse:
 
 Wrapper: `~/workspace/scripts/tts-telegram.sh`
 
+Der Workspace-Wrapper ist jetzt absichtlich dünn und ruft das Repo-CLI `tts_telegram.py` auf.
+Die eigentliche Orchestrierung liegt damit zentral, testbar und ohne fragile Bash-JSON-/PID-Logik im Repository.
+
 Neues Routing:
 - prüft `/health` + `/info`
 - berücksichtigt Textlänge gegen die vom Server gelieferten Routing-Schwellen
 - vermeidet Restart-Stürme, wenn `startup_error` bereits auf `Insufficient MemAvailable` zeigt
 - nutzt Legacy nur temporär und stellt danach `faster-large` wieder her
+- führt WAV→OGG und Telegram `sendVoice` im selben Python-Prozess aus
 
 ## Wichtige Dateien
 
@@ -235,6 +240,8 @@ Neues Routing:
 | `tts_config.py` | Zentrale Profil-, Warmup- und Routing-Konfiguration |
 | `tts_server_faster.py` | Langtext-first Faster-Server |
 | `tts_server.py` | Legacy-Fallback-Server |
+| `tts_telegram.py` | Kleine Python-Orchestrierung für Routing, Fallback, OGG und Telegram-Upload |
+| `tests/test_tts_telegram.py` | Gezielte Tests für Routing- und Cleanup-Logik |
 | `benchmark_longtext.py` | Langtext-Benchmarking |
 | `install-service.sh` | Systemd-Installation mit Profilen + Warmup-Optionen |
 | `JETSON_NOTES.md` | Detaillierte Jetson-Analyse |
