@@ -208,19 +208,15 @@ Es gibt zwei Wahrheiten gleichzeitig:
 
 ### Neue Validierung dieses Schritts
 
-Auf dem Hostzustand dieser Session war `MemAvailable` teils nur noch **~0.7–1.0 GB**.
+Auf dem Hostzustand dieser Session war `MemAvailable` teils nur noch **~0.2–1.0 GB**.
 Das ist absichtlich ein harter Test für Robustheit, nicht für Durchsatz.
 
 Messbare Ergebnisse:
-- neuer `large`-Default startet bei Speichermangel sauber mit **klarer `startup_error`-Meldung** statt blindem Warmup-Druck
-- `/health` und `/info` zeigen jetzt zusätzlich `warmup_state`
-- textabhängige Schwellen ergeben für `large`:
-  - 100 Zeichen → 1.6 GB
-  - 1000 Zeichen → 2.2 GB
-  - 1500/2200 Zeichen → 2.8 GB
-  - 3000 Zeichen → 3.0 GB
-- bei extrem niedrigem RAM blieb das System in **degraded**, aber kontrolliert ansprechbar
-- der Wrapper kann bei explizitem Speichermangel jetzt direkt auf Legacy gehen, statt erst Restart-Schleifen zu drehen
+- der Produktionspfad auf diesem Host läuft aktuell bewusst mit `profile=small`
+- `/health` und `/info` zeigen jetzt zusätzlich `warmup_state`, `busy`, `last_request_at`, `last_success_at`, `last_error`
+- direkte `/tts`-Calls können unter RAM-Druck weiter 500/503 liefern; für Bots ist deshalb der Orchestrator-Pfad der offizielle Weg
+- der Wrapper kann bei explizitem Speichermangel direkt auf Legacy gehen, statt erst Restart-Schleifen zu drehen
+- reale Tests: kurzer Test erfolgreich, längerer Test erfolgreich mit Fallback
 
 ## Telegram-Pfad
 
@@ -249,6 +245,23 @@ Neues Routing:
 | `tts_server_faster.py` | Langtext-first Faster-Server |
 | `tts_server.py` | Legacy-Fallback-Server |
 | `tts_telegram.py` | Kleine Python-Orchestrierung für Routing, Fallback, OGG und Telegram-Upload |
+| `tests/test_tts_telegram.py` | Gezielte Tests für Routing- und Cleanup-Logik |
+| `benchmark_longtext.py` | Langtext-Benchmarking |
+| `install-service.sh` | Systemd-Installation mit Profilen + Warmup-Optionen |
+| `JETSON_NOTES.md` | Detaillierte Jetson-Analyse |
+
+## Lizenz
+
+Apache-2.0
+/test_tts_telegram.py` | Gezielte Tests für Routing- und Cleanup-Logik |
+| `benchmark_longtext.py` | Langtext-Benchmarking |
+| `install-service.sh` | Systemd-Installation mit Profilen + Warmup-Optionen |
+| `JETSON_NOTES.md` | Detaillierte Jetson-Analyse |
+
+## Lizenz
+
+Apache-2.0
+für Routing, Fallback, OGG und Telegram-Upload |
 | `tests/test_tts_telegram.py` | Gezielte Tests für Routing- und Cleanup-Logik |
 | `benchmark_longtext.py` | Langtext-Benchmarking |
 | `install-service.sh` | Systemd-Installation mit Profilen + Warmup-Optionen |
