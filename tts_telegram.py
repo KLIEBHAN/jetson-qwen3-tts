@@ -523,6 +523,10 @@ class Orchestrator:
             return
         services = list(dict.fromkeys(self.paused_services))
         self.paused_services = []
+        restore_enabled = os.environ.get("TTS_RESTORE_ENABLED", "1") not in {"0", "false", "False"}
+        if not restore_enabled:
+            log(f"Leaving paused services inactive for on-demand mode: {' '.join(services)}")
+            return
         delay = int(getattr(self.args, "restore_delay_seconds", 0) or 0)
         if delay > 0:
             log(f"Delaying restore of paused services by {delay}s: {' '.join(services)}")
