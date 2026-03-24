@@ -22,6 +22,7 @@ DEFAULT_RESTORE_POLL_SECONDS = int(os.environ.get("TTS_RESTORE_POLL_SECONDS", "1
 DEFAULT_RESTORE_STABLE_SAMPLES = int(os.environ.get("TTS_RESTORE_STABLE_SAMPLES", "2"))
 DEFAULT_RESTORE_HYSTERESIS_GB = float(os.environ.get("TTS_RESTORE_HYSTERESIS_GB", "0.2"))
 DEFAULT_RESTORE_DELAY_SECONDS = int(os.environ.get("TTS_RESTORE_DELAY_SECONDS", "0"))
+DEFAULT_RESTORE_HELPER = os.environ.get("TTS_RESTORE_HELPER", "/home/ursula/workspace/scripts/restore-services.sh")
 
 DEFAULT_SERVER = os.environ.get("TTS_SERVER", "http://127.0.0.1:5050").rstrip("/")
 DEFAULT_MAX_TIME = int(os.environ.get("TTS_MAX_TIME", "1800"))
@@ -525,11 +526,17 @@ class Orchestrator:
         delay = int(getattr(self.args, "restore_delay_seconds", 0) or 0)
         if delay > 0:
             log(f"Delaying restore of paused services by {delay}s: {' '.join(services)}")
-            subprocess.run([
-                "bash",
-                "-lc",
-                f"sleep {delay}; sudo systemctl start {' '.join(services)} >/dev/null 2>&1 || true",
-            ], check=False, start_new_session=True)
+            env = {
+                **os.environ,
+                "TTS_RESTORE_DELAY_SECONDS": str(delay),
+            }
+            subprocess.Popen(
+                [DEFAULT_RESTORE_HELPER, *services],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
             return
         log(f"Restoring paused services: {' '.join(services)}")
         subprocess.run(["sudo", "systemctl", "start", *services], check=False)
